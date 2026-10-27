@@ -135,20 +135,30 @@ def receive_inform(device_id: str, request: InformRequest):
             request.deviceId,
         )
 
-    # Create or update the device inventory.
-    device = devices.setdefault(
-        device_id,
-        {
+    # Create or update the device inventory. Any Inform registers an unknown
+    # device: after a controller restart, devices only send PERIODIC until
+    # their next reboot, so waiting for BOOT would hide them.
+    device = devices.get(device_id)
+    if device is None:
+        device = {
             "deviceId": device_id,
             "firmwareVersion": request.firmwareVersion,
             "lastSeen": None,
             "lastEvent": None,
-        },
-    )
+            "lastBoot": None,
+        }
+        devices[device_id] = device
+        logger.info(
+            "Device registered: deviceId=%s via event=%s",
+            device_id,
+            request.event,
+        )
 
     device["firmwareVersion"] = request.firmwareVersion
     device["lastSeen"] = utc_now()
     device["lastEvent"] = request.event
+    if request.event == "BOOT":
+        device["lastBoot"] = device["lastSeen"]
 
     logger.info(
         "Device updated: deviceId=%s firmwareVersion=%s",
