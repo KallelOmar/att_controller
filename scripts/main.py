@@ -1,5 +1,6 @@
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -8,12 +9,20 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field, HttpUrl
 
 
-# Logging
+# Logging: PERIODIC Informs are logged at DEBUG, so they are hidden at INFO.
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 logger = logging.getLogger("controller")
+logger.setLevel(LOG_LEVEL)
+
+# uvicorn's access line can't tell PERIODIC from other events,
+# so show it only in DEBUG mode.
+if LOG_LEVEL != "DEBUG":
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 app = FastAPI(title="Device Management Controller")
 
@@ -120,7 +129,13 @@ def create_campaign(request: CreateCampaignRequest):
 
 @app.post("/devices/{device_id}/inform")
 def receive_inform(device_id: str, request: InformRequest):
-    logger.info(
+    # PERIODIC Informs are routine and frequent: log them only at DEBUG.
+    event_log_level = (
+        logging.DEBUG if request.event == "PERIODIC" else logging.INFO
+    )
+
+    logger.log(
+        event_log_level,
         "INFORM received: deviceId=%s event=%s firmwareVersion=%s",
         device_id,
         request.event,
@@ -160,7 +175,8 @@ def receive_inform(device_id: str, request: InformRequest):
     if request.event == "BOOT":
         device["lastBoot"] = device["lastSeen"]
 
-    logger.info(
+    logger.log(
+        event_log_level,
         "Device updated: deviceId=%s firmwareVersion=%s",
         device_id,
         request.firmwareVersion,
