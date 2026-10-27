@@ -1,12 +1,17 @@
 
 import logging
 import os
+import urllib.request
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import BackgroundTasks, FastAPI
 from pydantic import BaseModel, Field, HttpUrl
+
+
+# Base URL used to send Connection Requests to devices.
+SIMULATOR_URL = os.getenv("SIMULATOR_URL", "http://localhost:9000").rstrip("/")
 
 
 # Logging: PERIODIC Informs are logged at DEBUG, so they are hidden at INFO.
@@ -54,8 +59,8 @@ class CreateCampaignRequest(BaseModel):
 class TransferComplete(BaseModel):
     commandKey: str
     faultCode: int
-    startTime: str | None = None
-    completeTime: str | None = None
+    startTime: float | None = None
+    completeTime: float | None = None
 
 
 class InformRequest(BaseModel):
@@ -78,8 +83,39 @@ class CommandResponseRequest(BaseModel):
 
 # ---------- Campaign API ----------
 
+def send_connection_requests(current_version: str):
+    """Ask every device on current_version to open a session (CR Inform)."""
+    # Copy the list: devices may be added by Informs while we iterate.
+    targets = [
+        device_id
+        for device_id, device in list(devices.items())
+        if device["firmwareVersion"] == current_version
+    ]
+    logger.info(
+        "Sending Connection Requests: currentVersion=%s devices=%d",
+        current_version,
+        len(targets),
+    )
+
+    for device_id in targets:
+        url = f"{SIMULATOR_URL}/devices/{device_id}/connection-request"
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(url, method="POST"), timeout=5
+            )
+        except OSError as exc:
+            logger.warning(
+                "Connection Request failed: deviceId=%s error=%s",
+                device_id,
+                exc,
+            )
+
+
 @app.post("/campaigns", status_code=201)
-def create_campaign(request: CreateCampaignRequest):
+def create_campaign(
+    request: CreateCampaignRequest,
+    background_tasks: BackgroundTasks,
+):
     current_version = request.deviceFilter.currentVersion
 
     for existing in campaigns:
@@ -110,6 +146,9 @@ def create_campaign(request: CreateCampaignRequest):
     }
 
     campaigns.append(campaign)
+
+    # Runs after the response is sent, so the API call returns immediately.
+    background_tasks.add_task(send_connection_requests, current_version)
 
     logger.info(
         "Campaign created: id=%s currentVersion=%s targetVersion=%s",
