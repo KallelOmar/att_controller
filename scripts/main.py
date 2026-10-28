@@ -13,7 +13,7 @@ from typing import Literal
 from uuid import uuid4
 
 import yaml
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 
 
@@ -144,8 +144,12 @@ def count_in_flight(campaign):
 def campaign_counts(campaign):
     """Device counts per state and the failure rate of finished devices."""
     by_state = dict.fromkeys(DEVICE_STATES, 0)
+    failure_reasons = {}
     for attempt in campaign["devices"].values():
         by_state[attempt["status"]] += 1
+        if attempt["status"] in ("FAILED", "TIMED_OUT"):
+            reason = attempt["failureReason"]
+            failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
 
     # TODO: exclude TIMED_OUT with reason NO_CALLBACK: the device was
     # offline and never got the image, so it says nothing about the
@@ -154,10 +158,13 @@ def campaign_counts(campaign):
     finished = by_state["SUCCEEDED"] + failed
     return {
         "total": len(campaign["devices"]),
-        "byState": by_state,
-        "failed": failed,
+        "inFlight": sum(by_state[state] for state in IN_FLIGHT_STATES),
         "finished": finished,
+        "succeeded": by_state["SUCCEEDED"],
+        "failed": failed,
         "failureRatePercent": 100 * failed / finished if finished else 0.0,
+        "byState": by_state,
+        "failureReasons": dict(sorted(failure_reasons.items())),
     }
 
 
@@ -174,6 +181,7 @@ def update_campaign_status(campaign):
     else:
         return
 
+    campaign["endedAt"] = utc_now()
     logger.info(
         "Campaign %s: campaignId=%s failed=%d finished=%d total=%d "
         "failureRate=%.1f%% threshold=%s%%",
@@ -377,6 +385,8 @@ def create_campaign(
             "maxConcurrent": request.maxConcurrent,
             "failureThresholdPercent": request.failureThresholdPercent,
             "status": "PENDING",
+            "createdAt": utc_now(),
+            "endedAt": None,
             "devices": {},
         }
 
@@ -397,6 +407,35 @@ def create_campaign(
         "status": campaign["status"],
         "message": "Campaign created successfully",
     }
+
+
+@app.get("/campaigns/{campaign_id}")
+def get_campaign(campaign_id: str):
+    with state_lock:
+        campaign = next(
+            (c for c in campaigns if c["id"] == campaign_id), None
+        )
+        if campaign is None:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+
+        # One snapshot under the lock, so status and counts agree.
+        progress = campaign_counts(campaign)
+        progress["failureRatePercent"] = round(
+            progress["failureRatePercent"], 1
+        )
+        progress["minSampleSize"] = MIN_SAMPLE_SIZE
+        return {
+            "id": campaign["id"],
+            "status": campaign["status"],
+            "targetVersion": campaign["targetVersion"],
+            "imageUrl": campaign["imageUrl"],
+            "deviceFilter": campaign["deviceFilter"],
+            "maxConcurrent": campaign["maxConcurrent"],
+            "failureThresholdPercent": campaign["failureThresholdPercent"],
+            "createdAt": campaign["createdAt"],
+            "endedAt": campaign["endedAt"],
+            "progress": progress,
+        }
 
 
 # ---------- Device API ----------
