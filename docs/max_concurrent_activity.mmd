@@ -1,0 +1,9 @@
+
+flowchart TD
+    A[Select next PENDING device] --> B{Active upgrades < maxConcurrent?}
+    B -->|No| C[Keep device PENDING]
+    C --> D[Wait for an active upgrade to finish]
+    D --> A
+    B -->|Yes| E[Send connection request]
+    E --> F[Set WAITING_FOR_CONNECTION]
+

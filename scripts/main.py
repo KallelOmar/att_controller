@@ -2,7 +2,6 @@
 import asyncio
 import json
 import logging
-import os
 import time
 import urllib.parse
 import urllib.request
@@ -16,7 +15,7 @@ from pydantic import BaseModel, Field, HttpUrl
 
 
 # Base URL used to list devices and send Connection Requests to them.
-SIMULATOR_URL = os.getenv("SIMULATOR_URL", "http://localhost:9000").rstrip("/")
+SIMULATOR_URL = "http://localhost:9000"
 
 # Device states. SUCCEEDED and FAILED are final; TIMED_OUT can still be
 # corrected by a late TransferComplete or BOOT for the same commandKey.
@@ -25,19 +24,19 @@ FINAL_STATES = ("SUCCEEDED", "FAILED")
 # Waiting state -> (timeout in seconds, failureReason when it expires).
 # ACCEPTED covers download + reboot, which can take several minutes.
 STATE_TIMEOUTS = {
-    "NOTIFIED": (int(os.getenv("NOTIFIED_TIMEOUT_SEC", "60")), "NO_CALLBACK"),
-    "DOWNLOAD_SENT": (int(os.getenv("DOWNLOAD_SENT_TIMEOUT_SEC", "60")), "NO_ACK"),
-    "ACCEPTED": (int(os.getenv("ACCEPTED_TIMEOUT_SEC", "600")), "NO_COMPLETION"),
+    "NOTIFIED": (60, "NO_CALLBACK"), # Fixed for simplicity; to be made configurable later.
+    "DOWNLOAD_SENT": (60, "NO_ACK"),
+    "ACCEPTED": (600, "NO_COMPLETION"),
 }
 TIMEOUT_CHECK_SEC = 5
 
 # A BOOT sooner than this after ACCEPTED cannot be the post-upgrade reboot:
 # it is a duplicated/late BOOT from before the Download.
-MIN_REBOOT_SEC = int(os.getenv("MIN_REBOOT_SEC", "5"))
+MIN_REBOOT_SEC = 5
 
 
 # Logging: PERIODIC Informs are logged at DEBUG, so they are hidden at INFO.
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = "INFO"
 
 logging.basicConfig(
     level=logging.INFO,
