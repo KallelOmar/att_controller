@@ -1,0 +1,21 @@
+# Controller tuning parameters.
+
+# Simulator base URL, used to list the fleet and send Connection Requests.
+# In Docker Compose, use the simulator's service name, e.g. http://simulator:9000.
+simulator_url: http://localhost:9000
+
+# Seconds a device may stay in each waiting state before it goes TIMED_OUT.
+timeouts:
+  notified_sec: 60        # waiting for the CONNECTION_REQUEST inform
+  download_sent_sec: 60   # waiting for the command-response
+  accepted_sec: 600       # download + reboot; simulator max is 20s + 240s
+
+# How often the timeout loop checks the waiting devices.
+timeout_check_sec: 5
+
+# A BOOT sooner than this after ACCEPTED is a duplicated BOOT from before
+# the Download, not the post-upgrade reboot.
+min_reboot_sec: 5
+
+# INFO hides PERIODIC Informs and uvicorn access lines; DEBUG shows them.
+log_level: INFO

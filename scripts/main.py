@@ -7,15 +7,22 @@ import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+import yaml
 from fastapi import BackgroundTasks, FastAPI
 from pydantic import BaseModel, Field, HttpUrl
 
 
+# Tuning parameters, documented in config.yml.
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yml"
+with open(CONFIG_PATH) as config_file:
+    config = yaml.safe_load(config_file)
+
 # Base URL used to list devices and send Connection Requests to them.
-SIMULATOR_URL = "http://localhost:9000"
+SIMULATOR_URL = config["simulator_url"].rstrip("/")
 
 # Device states. SUCCEEDED and FAILED are final; TIMED_OUT can still be
 # corrected by a late TransferComplete or BOOT for the same commandKey.
@@ -24,19 +31,19 @@ FINAL_STATES = ("SUCCEEDED", "FAILED")
 # Waiting state -> (timeout in seconds, failureReason when it expires).
 # ACCEPTED covers download + reboot, which can take several minutes.
 STATE_TIMEOUTS = {
-    "NOTIFIED": (60, "NO_CALLBACK"), # Fixed for simplicity; to be made configurable later.
-    "DOWNLOAD_SENT": (60, "NO_ACK"),
-    "ACCEPTED": (600, "NO_COMPLETION"),
+    "NOTIFIED": (config["timeouts"]["notified_sec"], "NO_CALLBACK"),
+    "DOWNLOAD_SENT": (config["timeouts"]["download_sent_sec"], "NO_ACK"),
+    "ACCEPTED": (config["timeouts"]["accepted_sec"], "NO_COMPLETION"),
 }
-TIMEOUT_CHECK_SEC = 5
+TIMEOUT_CHECK_SEC = config["timeout_check_sec"]
 
 # A BOOT sooner than this after ACCEPTED cannot be the post-upgrade reboot:
 # it is a duplicated/late BOOT from before the Download.
-MIN_REBOOT_SEC = 5
+MIN_REBOOT_SEC = config["min_reboot_sec"]
 
 
 # Logging: PERIODIC Informs are logged at DEBUG, so they are hidden at INFO.
-LOG_LEVEL = "INFO"
+LOG_LEVEL = config["log_level"].upper()
 
 logging.basicConfig(
     level=logging.INFO,
