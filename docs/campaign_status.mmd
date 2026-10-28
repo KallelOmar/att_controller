@@ -1,0 +1,32 @@
+stateDiagram-v2
+    direction TB
+
+    [*] --> PENDING : POST /campaigns<br/>(no active campaign with the same<br/>currentVersion and targetVersion)
+
+    PENDING --> IN_PROGRESS : targets loaded from GET /devices?version=,<br/>one PENDING device attempt each
+
+    IN_PROGRESS --> IN_PROGRESS : scheduler tick: time out stuck devices,<br/>nudge PENDING devices while<br/>in flight < maxConcurrent
+
+    IN_PROGRESS --> HALTED : scheduler tick: finished ≥ min_sample_size<br/>and failure rate > failureThresholdPercent
+    IN_PROGRESS --> COMPLETED : scheduler tick: no PENDING<br/>and no device in flight
+
+    HALTED --> [*]
+    COMPLETED --> [*]
+
+    note right of IN_PROGRESS
+        finished = SUCCEEDED + FAILED + TIMED_OUT
+        failure rate = (FAILED + TIMED_OUT) / finished
+        The threshold is checked before completion,
+        so a campaign that ends over it is HALTED.
+    end note
+
+    note left of HALTED
+        No new device is nudged. Devices already
+        in flight finish and are still tracked.
+        HALTED and COMPLETED are final.
+    end note
+
+    note left of PENDING
+        Stays PENDING if the device list
+        cannot be fetched from the simulator.
+    end note

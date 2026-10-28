@@ -15,6 +15,11 @@ timeouts:
 # waits at most one tick before it is refilled.
 scheduler_tick_sec: 2
 
+# A campaign halts when its failure rate exceeds failureThresholdPercent,
+# checked only once this many devices have finished (SUCCEEDED, FAILED or
+# TIMED_OUT). A fleet smaller than this never halts.
+min_sample_size: 20
+
 # A BOOT sooner than this after ACCEPTED is a duplicated BOOT from before
 # the Download, not the post-upgrade reboot.
 min_reboot_sec: 5

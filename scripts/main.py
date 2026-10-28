@@ -27,6 +27,15 @@ SIMULATOR_URL = config["simulator_url"].rstrip("/")
 
 # Device states. SUCCEEDED and FAILED are final; TIMED_OUT can still be
 # corrected by a late TransferComplete or BOOT for the same commandKey.
+DEVICE_STATES = (
+    "PENDING",
+    "NOTIFIED",
+    "DOWNLOAD_SENT",
+    "ACCEPTED",
+    "SUCCEEDED",
+    "FAILED",
+    "TIMED_OUT",
+)
 FINAL_STATES = ("SUCCEEDED", "FAILED")
 
 # States in which the controller is waiting on the device. They count
@@ -41,6 +50,10 @@ STATE_TIMEOUTS = {
     "ACCEPTED": (config["timeouts"]["accepted_sec"], "NO_COMPLETION"),
 }
 SCHEDULER_TICK_SEC = config["scheduler_tick_sec"]
+
+# The failure threshold is checked only once this many devices finished,
+# so the first failures cannot halt a campaign on their own.
+MIN_SAMPLE_SIZE = config["min_sample_size"]
 
 # A BOOT sooner than this after ACCEPTED cannot be the post-upgrade reboot:
 # it is a duplicated/late BOOT from before the Download.
@@ -128,6 +141,52 @@ def count_in_flight(campaign):
     )
 
 
+def campaign_counts(campaign):
+    """Device counts per state and the failure rate of finished devices."""
+    by_state = dict.fromkeys(DEVICE_STATES, 0)
+    for attempt in campaign["devices"].values():
+        by_state[attempt["status"]] += 1
+
+    # TODO: exclude TIMED_OUT with reason NO_CALLBACK: the device was
+    # offline and never got the image, so it says nothing about the
+    # firmware and should not count toward halting the campaign.
+    failed = by_state["FAILED"] + by_state["TIMED_OUT"]
+    finished = by_state["SUCCEEDED"] + failed
+    return {
+        "total": len(campaign["devices"]),
+        "byState": by_state,
+        "failed": failed,
+        "finished": finished,
+        "failureRatePercent": 100 * failed / finished if finished else 0.0,
+    }
+
+
+def update_campaign_status(campaign):
+    """Halt above the failure threshold; complete once every device is done."""
+    counts = campaign_counts(campaign)
+    if (
+        counts["finished"] >= MIN_SAMPLE_SIZE
+        and counts["failureRatePercent"] > campaign["failureThresholdPercent"]
+    ):
+        campaign["status"] = "HALTED"
+    elif counts["byState"]["PENDING"] == 0 and count_in_flight(campaign) == 0:
+        campaign["status"] = "COMPLETED"
+    else:
+        return
+
+    logger.info(
+        "Campaign %s: campaignId=%s failed=%d finished=%d total=%d "
+        "failureRate=%.1f%% threshold=%s%%",
+        campaign["status"],
+        campaign["id"],
+        counts["failed"],
+        counts["finished"],
+        counts["total"],
+        counts["failureRatePercent"],
+        campaign["failureThresholdPercent"],
+    )
+
+
 def select_devices_to_notify(campaign):
     """Move PENDING devices to NOTIFIED while under maxConcurrent."""
     free = campaign["maxConcurrent"] - count_in_flight(campaign)
@@ -169,6 +228,10 @@ def scheduler_tick():
     with state_lock:
         # Timeouts first, so the slots they free are refilled this tick.
         check_timeouts()
+        # Before nudging: a campaign over its threshold starts no device.
+        for campaign in campaigns:
+            if campaign["status"] == "IN_PROGRESS":
+                update_campaign_status(campaign)
         to_notify = [
             (campaign, attempt)
             for campaign in campaigns
