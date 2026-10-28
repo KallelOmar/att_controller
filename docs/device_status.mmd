@@ -3,8 +3,8 @@ stateDiagram-v2
 
     [*] --> PENDING : campaign created,<br/>device listed by GET /devices?version=
 
-    PENDING --> NOTIFIED : connection request sent
-    NOTIFIED --> PENDING : connection request failed
+    PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS<br/>and in flight < maxConcurrent;<br/>connection request sent
+    NOTIFIED --> PENDING : connection request failed,<br/>retried on a later tick
 
     NOTIFIED --> DOWNLOAD_SENT : CONNECTION_REQUEST inform,<br/>DOWNLOAD returned with commandKey
     NOTIFIED --> TIMED_OUT : no inform in 60s<br/>reason=NO_CALLBACK (offline)

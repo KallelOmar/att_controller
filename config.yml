@@ -10,8 +10,10 @@ timeouts:
   download_sent_sec: 60   # waiting for the command-response
   accepted_sec: 600       # download + reboot; simulator max is 20s + 240s
 
-# How often the timeout loop checks the waiting devices.
-timeout_check_sec: 5
+# How often the scheduler runs: it times out stuck devices, then nudges
+# PENDING devices while a campaign is under maxConcurrent. A freed slot
+# waits at most one tick before it is refilled.
+scheduler_tick_sec: 2
 
 # A BOOT sooner than this after ACCEPTED is a duplicated BOOT from before
 # the Download, not the post-upgrade reboot.

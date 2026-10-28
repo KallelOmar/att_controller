@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -28,6 +29,10 @@ SIMULATOR_URL = config["simulator_url"].rstrip("/")
 # corrected by a late TransferComplete or BOOT for the same commandKey.
 FINAL_STATES = ("SUCCEEDED", "FAILED")
 
+# States in which the controller is waiting on the device. They count
+# toward the campaign's maxConcurrent.
+IN_FLIGHT_STATES = ("NOTIFIED", "DOWNLOAD_SENT", "ACCEPTED")
+
 # Waiting state -> (timeout in seconds, failureReason when it expires).
 # ACCEPTED covers download + reboot, which can take several minutes.
 STATE_TIMEOUTS = {
@@ -35,7 +40,7 @@ STATE_TIMEOUTS = {
     "DOWNLOAD_SENT": (config["timeouts"]["download_sent_sec"], "NO_ACK"),
     "ACCEPTED": (config["timeouts"]["accepted_sec"], "NO_COMPLETION"),
 }
-TIMEOUT_CHECK_SEC = config["timeout_check_sec"]
+SCHEDULER_TICK_SEC = config["scheduler_tick_sec"]
 
 # A BOOT sooner than this after ACCEPTED cannot be the post-upgrade reboot:
 # it is a duplicated/late BOOT from before the Download.
@@ -60,6 +65,10 @@ if LOG_LEVEL != "DEBUG":
 # Temporary in-memory storage
 campaigns = []
 devices = {}
+
+# Handlers run in a thread pool next to the scheduler thread: hold this
+# lock for every check-then-update of the state above.
+state_lock = threading.Lock()
 
 
 def utc_now():
@@ -110,18 +119,81 @@ def check_timeouts():
                 set_device_status(campaign, attempt, "TIMED_OUT", reason)
 
 
-async def timeout_loop():
+# ---------- Scheduler ----------
+
+def count_in_flight(campaign):
+    return sum(
+        attempt["status"] in IN_FLIGHT_STATES
+        for attempt in campaign["devices"].values()
+    )
+
+
+def select_devices_to_notify(campaign):
+    """Move PENDING devices to NOTIFIED while under maxConcurrent."""
+    free = campaign["maxConcurrent"] - count_in_flight(campaign)
+    if free <= 0:
+        return []
+
+    selected = [
+        attempt
+        for attempt in campaign["devices"].values()
+        if attempt["status"] == "PENDING"
+    ][:free]
+
+    # Set before sending: the device may call back before urlopen returns.
+    for attempt in selected:
+        set_device_status(campaign, attempt, "NOTIFIED")
+    return selected
+
+
+def send_connection_request(campaign, attempt):
+    device_id = attempt["deviceId"]
+    url = f"{SIMULATOR_URL}/devices/{device_id}/connection-request"
+    try:
+        urllib.request.urlopen(
+            urllib.request.Request(url, method="POST"), timeout=5
+        )
+    except OSError as exc:
+        logger.warning(
+            "Connection Request failed: deviceId=%s error=%s",
+            device_id,
+            exc,
+        )
+        # Back to the queue; a later tick retries it.
+        with state_lock:
+            if attempt["status"] == "NOTIFIED":
+                set_device_status(campaign, attempt, "PENDING")
+
+
+def scheduler_tick():
+    with state_lock:
+        # Timeouts first, so the slots they free are refilled this tick.
+        check_timeouts()
+        to_notify = [
+            (campaign, attempt)
+            for campaign in campaigns
+            if campaign["status"] == "IN_PROGRESS"
+            for attempt in select_devices_to_notify(campaign)
+        ]
+
+    # Outside the lock: the devices' callbacks need it while we send.
+    for campaign, attempt in to_notify:
+        send_connection_request(campaign, attempt)
+
+
+async def scheduler_loop():
     while True:
-        await asyncio.sleep(TIMEOUT_CHECK_SEC)
+        await asyncio.sleep(SCHEDULER_TICK_SEC)
         try:
-            check_timeouts()
+            # urlopen blocks: run in a thread so the API keeps serving.
+            await asyncio.to_thread(scheduler_tick)
         except Exception:
-            logger.exception("Timeout check failed")
+            logger.exception("Scheduler tick failed")
 
 
 @asynccontextmanager
 async def lifespan(_app):
-    task = asyncio.create_task(timeout_loop())
+    task = asyncio.create_task(scheduler_loop())
     yield
     task.cancel()
 
@@ -180,8 +252,8 @@ def fetch_target_devices(current_version: str):
         return [device["deviceId"] for device in json.load(response)]
 
 
-def send_connection_requests(campaign):
-    """Track every target device as PENDING, then ask each to call back."""
+def load_targets(campaign):
+    """Track every target device as PENDING; the scheduler nudges them."""
     current_version = campaign["deviceFilter"]["currentVersion"]
     try:
         targets = fetch_target_devices(current_version)
@@ -193,37 +265,21 @@ def send_connection_requests(campaign):
         )
         return
 
-    for device_id in targets:
-        campaign["devices"].setdefault(
-            device_id, new_attempt(device_id, campaign)
-        )
+    with state_lock:
+        for device_id in targets:
+            campaign["devices"].setdefault(
+                device_id, new_attempt(device_id, campaign)
+            )
+        campaign["status"] = "IN_PROGRESS"
+
     logger.info(
-        "Sending Connection Requests: campaignId=%s currentVersion=%s "
-        "devices=%d",
+        "Campaign targets loaded: campaignId=%s currentVersion=%s "
+        "devices=%d maxConcurrent=%d",
         campaign["id"],
         current_version,
         len(targets),
+        campaign["maxConcurrent"],
     )
-
-    for device_id in targets:
-        attempt = campaign["devices"][device_id]
-        if attempt["status"] != "PENDING":
-            continue
-
-        # Set before sending: the device may call back before urlopen returns.
-        set_device_status(campaign, attempt, "NOTIFIED")
-        url = f"{SIMULATOR_URL}/devices/{device_id}/connection-request"
-        try:
-            urllib.request.urlopen(
-                urllib.request.Request(url, method="POST"), timeout=5
-            )
-        except OSError as exc:
-            logger.warning(
-                "Connection Request failed: deviceId=%s error=%s",
-                device_id,
-                exc,
-            )
-            set_device_status(campaign, attempt, "PENDING")
 
 
 @app.post("/campaigns", status_code=201)
@@ -233,37 +289,38 @@ def create_campaign(
 ):
     current_version = request.deviceFilter.currentVersion
 
-    for existing in campaigns:
-        if (
-            existing["deviceFilter"]["currentVersion"] == current_version
-            and existing["targetVersion"] == request.targetVersion
-            and existing["status"] in ("PENDING", "IN_PROGRESS")
-        ):
-            logger.info(
-                "Matching active campaign already exists: id=%s",
-                existing["id"],
-            )
-            return {
-                "id": existing["id"],
-                "status": existing["status"],
-                "message": "Matching active campaign already exists",
-            }
+    with state_lock:
+        for existing in campaigns:
+            if (
+                existing["deviceFilter"]["currentVersion"] == current_version
+                and existing["targetVersion"] == request.targetVersion
+                and existing["status"] in ("PENDING", "IN_PROGRESS")
+            ):
+                logger.info(
+                    "Matching active campaign already exists: id=%s",
+                    existing["id"],
+                )
+                return {
+                    "id": existing["id"],
+                    "status": existing["status"],
+                    "message": "Matching active campaign already exists",
+                }
 
-    campaign = {
-        "id": str(uuid4()),
-        "targetVersion": request.targetVersion,
-        "imageUrl": str(request.imageUrl),
-        "deviceFilter": request.deviceFilter.model_dump(),
-        "maxConcurrent": request.maxConcurrent,
-        "failureThresholdPercent": request.failureThresholdPercent,
-        "status": "PENDING",
-        "devices": {},
-    }
+        campaign = {
+            "id": str(uuid4()),
+            "targetVersion": request.targetVersion,
+            "imageUrl": str(request.imageUrl),
+            "deviceFilter": request.deviceFilter.model_dump(),
+            "maxConcurrent": request.maxConcurrent,
+            "failureThresholdPercent": request.failureThresholdPercent,
+            "status": "PENDING",
+            "devices": {},
+        }
 
-    campaigns.append(campaign)
+        campaigns.append(campaign)
 
     # Runs after the response is sent, so the API call returns immediately.
-    background_tasks.add_task(send_connection_requests, campaign)
+    background_tasks.add_task(load_targets, campaign)
 
     logger.info(
         "Campaign created: id=%s currentVersion=%s targetVersion=%s",
@@ -304,188 +361,189 @@ def receive_inform(device_id: str, request: InformRequest):
             request.deviceId,
         )
 
-    # Create or update the device inventory. Any Inform registers an unknown
-    # device: after a controller restart, devices only send PERIODIC until
-    # their next reboot, so waiting for BOOT would hide them.
-    device = devices.get(device_id)
-    if device is None:
-        device = {
-            "deviceId": device_id,
-            "firmwareVersion": request.firmwareVersion,
-            "lastSeen": None,
-            "lastEvent": None,
-            "lastBoot": None,
-        }
-        devices[device_id] = device
-        logger.info(
-            "Device registered: deviceId=%s via event=%s",
+    with state_lock:
+        # Create or update the device inventory. Any Inform registers an
+        # unknown device: after a controller restart, devices only send
+        # PERIODIC until their next reboot, so waiting for BOOT would hide
+        # them.
+        device = devices.get(device_id)
+        if device is None:
+            device = {
+                "deviceId": device_id,
+                "firmwareVersion": request.firmwareVersion,
+                "lastSeen": None,
+                "lastEvent": None,
+                "lastBoot": None,
+            }
+            devices[device_id] = device
+            logger.info(
+                "Device registered: deviceId=%s via event=%s",
+                device_id,
+                request.event,
+            )
+
+        device["firmwareVersion"] = request.firmwareVersion
+        device["lastSeen"] = utc_now()
+        device["lastEvent"] = request.event
+        if request.event == "BOOT":
+            device["lastBoot"] = device["lastSeen"]
+
+        logger.log(
+            event_log_level,
+            "Device updated: deviceId=%s firmwareVersion=%s",
             device_id,
-            request.event,
+            request.firmwareVersion,
         )
 
-    device["firmwareVersion"] = request.firmwareVersion
-    device["lastSeen"] = utc_now()
-    device["lastEvent"] = request.event
-    if request.event == "BOOT":
-        device["lastBoot"] = device["lastSeen"]
+        # Process TransferComplete if the event contains it.
+        if request.transferComplete is not None:
+            tc = request.transferComplete
 
-    logger.log(
-        event_log_level,
-        "Device updated: deviceId=%s firmwareVersion=%s",
-        device_id,
-        request.firmwareVersion,
-    )
+            logger.info(
+                "TRANSFER_COMPLETE received: deviceId=%s commandKey=%s "
+                "faultCode=%s startTime=%s completeTime=%s",
+                device_id,
+                tc.commandKey,
+                tc.faultCode,
+                tc.startTime,
+                tc.completeTime,
+            )
 
-    # Process TransferComplete if the event contains it.
-    if request.transferComplete is not None:
-        tc = request.transferComplete
+            matching_campaign = None
+            attempt = None
 
-        logger.info(
-            "TRANSFER_COMPLETE received: deviceId=%s commandKey=%s "
-            "faultCode=%s startTime=%s completeTime=%s",
-            device_id,
-            tc.commandKey,
-            tc.faultCode,
-            tc.startTime,
-            tc.completeTime,
-        )
+            for campaign in campaigns:
+                candidate = campaign["devices"].get(device_id)
+                if candidate and candidate.get("commandKey") == tc.commandKey: #Correlate the TransferComplete with the correponding Download using commandKey.
+                    matching_campaign = campaign
+                    attempt = candidate
+                    break
 
-        matching_campaign = None
-        attempt = None
+            if attempt is None:
+                logger.warning(
+                    "Unknown commandKey in TransferComplete: deviceId=%s "
+                    "commandKey=%s",
+                    device_id,
+                    tc.commandKey,
+                )
+            elif attempt["status"] in FINAL_STATES:
+                logger.info(
+                    "Duplicate/late TransferComplete ignored: deviceId=%s "
+                    "commandKey=%s existingStatus=%s",
+                    device_id,
+                    tc.commandKey,
+                    attempt["status"],
+                )
+            else:
+                attempt["transferComplete"] = tc.model_dump()
+                if tc.faultCode == 0:
+                    set_device_status(matching_campaign, attempt, "SUCCEEDED")
+                else:
+                    set_device_status(
+                        matching_campaign,
+                        attempt,
+                        "FAILED",
+                        f"FAULT:{tc.faultCode}",
+                    )
 
-        for campaign in campaigns:
-            candidate = campaign["devices"].get(device_id)
-            if candidate and candidate.get("commandKey") == tc.commandKey:
-                matching_campaign = campaign
-                attempt = candidate
+        # A BOOT without TransferComplete after a Download: the reported
+        # firmware version tells whether the upgrade was applied.
+        if request.event == "BOOT":
+            for campaign in campaigns:
+                attempt = campaign["devices"].get(device_id)
+                if (
+                    attempt is None
+                    or attempt["commandKey"] is None
+                    or attempt["status"] not in ("ACCEPTED", "TIMED_OUT")
+                ):
+                    continue
+
+                if (
+                    attempt["status"] == "ACCEPTED"
+                    and time.time() - attempt["stateSince"] < MIN_REBOOT_SEC
+                ):
+                    logger.info(
+                        "Stale BOOT ignored: campaignId=%s deviceId=%s",
+                        campaign["id"],
+                        device_id,
+                    )
+                    continue
+
+                if request.firmwareVersion == attempt["targetVersion"]:
+                    set_device_status(campaign, attempt, "SUCCEEDED")
+                elif request.firmwareVersion == attempt["currentVersion"]:
+                    set_device_status(campaign, attempt, "FAILED", "REVERTED")
+                else:
+                    set_device_status(
+                        campaign,
+                        attempt,
+                        "FAILED",
+                        f"UNEXPECTED_VERSION:{request.firmwareVersion}",
+                    )
+
+        # Default response: no commands to deliver.
+        commands = []
+
+        # A connection-request Inform is the opportunity to return a command.
+        if request.event == "CONNECTION_REQUEST":
+            for campaign in campaigns:
+                if campaign["status"] not in ("PENDING", "IN_PROGRESS"):
+                    continue
+
+                expected_version = campaign["deviceFilter"]["currentVersion"]
+
+                if request.firmwareVersion != expected_version:
+                    continue
+
+                attempt = campaign["devices"].get(device_id)
+
+                # Only devices targeted by the campaign and not yet sent a
+                # Download get one: prevents duplicate Download commands.
+                if attempt is None or attempt["status"] not in (
+                    "PENDING",
+                    "NOTIFIED",
+                ):
+                    logger.info(
+                        "Download not issued: campaignId=%s deviceId=%s "
+                        "status=%s",
+                        campaign["id"],
+                        device_id,
+                        attempt["status"] if attempt else "NOT_TARGETED",
+                    )
+                    continue
+
+                command_key = str(uuid4())
+                attempt["commandKey"] = command_key
+                set_device_status(campaign, attempt, "DOWNLOAD_SENT")
+
+                commands.append(
+                    {
+                        "type": "DOWNLOAD",
+                        "commandKey": command_key,
+                        "url": campaign["imageUrl"],
+                        "targetVersion": campaign["targetVersion"],
+                    }
+                )
+
+                logger.info(
+                    "DOWNLOAD command prepared: campaignId=%s deviceId=%s "
+                    "commandKey=%s targetVersion=%s",
+                    campaign["id"],
+                    device_id,
+                    command_key,
+                    campaign["targetVersion"],
+                )
+
+                # One command per Inform in this initial version.
                 break
 
-        if attempt is None:
-            logger.warning(
-                "Unknown commandKey in TransferComplete: deviceId=%s "
-                "commandKey=%s",
-                device_id,
-                tc.commandKey,
-            )
-        elif attempt["status"] in FINAL_STATES:
-            logger.info(
-                "Duplicate/late TransferComplete ignored: deviceId=%s "
-                "commandKey=%s existingStatus=%s",
-                device_id,
-                tc.commandKey,
-                attempt["status"],
-            )
-        else:
-            attempt["transferComplete"] = tc.model_dump()
-            if tc.faultCode == 0:
-                set_device_status(matching_campaign, attempt, "SUCCEEDED")
-            else:
-                set_device_status(
-                    matching_campaign,
-                    attempt,
-                    "FAILED",
-                    f"FAULT:{tc.faultCode}",
-                )
-
-    # A BOOT without TransferComplete after a Download: the reported
-    # firmware version tells whether the upgrade was applied.
-    if request.event == "BOOT":
-        for campaign in campaigns:
-            attempt = campaign["devices"].get(device_id)
-            if (
-                attempt is None
-                or attempt["commandKey"] is None
-                or attempt["status"] not in ("ACCEPTED", "TIMED_OUT")
-            ):
-                continue
-
-            if (
-                attempt["status"] == "ACCEPTED"
-                and time.time() - attempt["stateSince"] < MIN_REBOOT_SEC
-            ):
+            if not commands:
                 logger.info(
-                    "Stale BOOT ignored: campaignId=%s deviceId=%s",
-                    campaign["id"],
+                    "No Download command issued: deviceId=%s "
+                    "firmwareVersion=%s",
                     device_id,
+                    request.firmwareVersion,
                 )
-                continue
-
-            if request.firmwareVersion == attempt["targetVersion"]:
-                set_device_status(campaign, attempt, "SUCCEEDED")
-            elif request.firmwareVersion == attempt["currentVersion"]:
-                set_device_status(campaign, attempt, "FAILED", "REVERTED")
-            else:
-                set_device_status(
-                    campaign,
-                    attempt,
-                    "FAILED",
-                    f"UNEXPECTED_VERSION:{request.firmwareVersion}",
-                )
-
-    # Default response: no commands to deliver.
-    commands = []
-
-    # A connection-request Inform is the opportunity to return a command.
-    if request.event == "CONNECTION_REQUEST":
-        for campaign in campaigns:
-            if campaign["status"] not in ("PENDING", "IN_PROGRESS"):
-                continue
-
-            expected_version = campaign["deviceFilter"]["currentVersion"]
-
-            if request.firmwareVersion != expected_version:
-                continue
-
-            attempt = campaign["devices"].get(device_id)
-
-            # Only devices targeted by the campaign and not yet sent a
-            # Download get one: prevents duplicate Download commands.
-            if attempt is None or attempt["status"] not in (
-                "PENDING",
-                "NOTIFIED",
-            ):
-                logger.info(
-                    "Download not issued: campaignId=%s deviceId=%s "
-                    "status=%s",
-                    campaign["id"],
-                    device_id,
-                    attempt["status"] if attempt else "NOT_TARGETED",
-                )
-                continue
-
-            command_key = str(uuid4())
-            attempt["commandKey"] = command_key
-            set_device_status(campaign, attempt, "DOWNLOAD_SENT")
-
-            campaign["status"] = "IN_PROGRESS"
-
-            commands.append(
-                {
-                    "type": "DOWNLOAD",
-                    "commandKey": command_key,
-                    "url": campaign["imageUrl"],
-                    "targetVersion": campaign["targetVersion"],
-                }
-            )
-
-            logger.info(
-                "DOWNLOAD command prepared: campaignId=%s deviceId=%s "
-                "commandKey=%s targetVersion=%s",
-                campaign["id"],
-                device_id,
-                command_key,
-                campaign["targetVersion"],
-            )
-
-            # One command per Inform in this initial version.
-            break
-
-        if not commands:
-            logger.info(
-                "No Download command issued: deviceId=%s firmwareVersion=%s",
-                device_id,
-                request.firmwareVersion,
-            )
 
     return {"commands": commands}
 
@@ -504,30 +562,31 @@ def receive_command_response(
         request.reason,
     )
 
-    for campaign in campaigns:
-        attempt = campaign["devices"].get(device_id)
+    with state_lock:
+        for campaign in campaigns:
+            attempt = campaign["devices"].get(device_id)
 
-        if attempt and attempt.get("commandKey") == request.commandKey:
-            # Only a first answer to the Download counts; duplicates and
-            # answers after the outcome is known are ignored.
-            if attempt["status"] not in ("DOWNLOAD_SENT", "TIMED_OUT"):
-                logger.info(
-                    "Command response ignored: deviceId=%s status=%s",
-                    device_id,
-                    attempt["status"],
-                )
+            if attempt and attempt.get("commandKey") == request.commandKey:
+                # Only a first answer to the Download counts; duplicates and
+                # answers after the outcome is known are ignored.
+                if attempt["status"] not in ("DOWNLOAD_SENT", "TIMED_OUT"):
+                    logger.info(
+                        "Command response ignored: deviceId=%s status=%s",
+                        device_id,
+                        attempt["status"],
+                    )
+                    return {"status": "recorded"}
+
+                if request.status == "ACCEPTED":
+                    set_device_status(campaign, attempt, "ACCEPTED")
+                else:
+                    set_device_status(
+                        campaign,
+                        attempt,
+                        "FAILED",
+                        f"REJECTED:{request.reason or 'UNKNOWN'}",
+                    )
                 return {"status": "recorded"}
-
-            if request.status == "ACCEPTED":
-                set_device_status(campaign, attempt, "ACCEPTED")
-            else:
-                set_device_status(
-                    campaign,
-                    attempt,
-                    "FAILED",
-                    f"REJECTED:{request.reason or 'UNKNOWN'}",
-                )
-            return {"status": "recorded"}
 
     logger.warning(
         "Command response has unknown commandKey: deviceId=%s commandKey=%s",
