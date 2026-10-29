@@ -5,7 +5,11 @@ Callers hold state_lock: the API handlers and the scheduler take it.
 
 import logging
 import time
+from typing import Literal
 
+from pydantic import BaseModel
+
+import metrics
 from config import (
     ACCEPTED_TIMEOUT_SEC,
     DOWNLOAD_SENT_TIMEOUT_SEC,
@@ -40,6 +44,33 @@ STATE_TIMEOUTS = {
     "DOWNLOAD_SENT": (DOWNLOAD_SENT_TIMEOUT_SEC, "NO_ACK"),
     "ACCEPTED": (ACCEPTED_TIMEOUT_SEC, "NO_COMPLETION"),
 }
+
+
+# ---------- Device API models ----------
+
+class TransferComplete(BaseModel):
+    commandKey: str
+    faultCode: int
+    startTime: float | None = None
+    completeTime: float | None = None
+
+
+class InformRequest(BaseModel):
+    deviceId: str
+    firmwareVersion: str
+    event: Literal[
+        "BOOT",
+        "CONNECTION_REQUEST",
+        "PERIODIC",
+        "TRANSFER_COMPLETE",
+    ]
+    transferComplete: TransferComplete | None = None
+
+
+class CommandResponseRequest(BaseModel):
+    commandKey: str
+    status: Literal["ACCEPTED", "REJECTED"]
+    reason: str | None = None
 
 
 # ---------- Device state machine ----------
@@ -169,6 +200,7 @@ def handle_transfer_complete(device_id, tc):
             "TransferComplete with unknown commandKey=%s ignored",
             tc.commandKey,
         )
+        metrics.count_event("unknownCommandKeys")
     elif attempt["status"] in FINAL_STATES:
         log_device(
             logging.INFO,
@@ -177,6 +209,7 @@ def handle_transfer_complete(device_id, tc):
             attempt["status"],
             campaign=matching_campaign,
         )
+        metrics.count_event("duplicateTransferCompletes")
     else:
         attempt["transferComplete"] = tc.model_dump()
         if tc.faultCode == 0:
@@ -213,6 +246,7 @@ def handle_boot(device_id, firmware_version):
                 MIN_REBOOT_SEC,
                 campaign=campaign,
             )
+            metrics.count_event("staleBootsIgnored")
             continue
 
         if firmware_version == attempt["targetVersion"]:
@@ -258,6 +292,7 @@ def handle_command_response(device_id, request):
                     attempt["status"],
                     campaign=campaign,
                 )
+                metrics.count_event("duplicateCommandResponses")
                 return "recorded"
 
             if request.status == "ACCEPTED":
@@ -277,4 +312,5 @@ def handle_command_response(device_id, request):
         "command-response with unknown commandKey=%s ignored",
         request.commandKey,
     )
+    metrics.count_event("unknownCommandKeys")
     return "unknown_command"

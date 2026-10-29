@@ -8,16 +8,14 @@ devices.py; scheduler.py runs in the background.
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 import campaigns
 import devices
+import metrics
+from campaigns import CreateCampaignRequest
+from devices import CommandResponseRequest, InformRequest
 from log import logger
-from models import (
-    CommandResponseRequest,
-    CreateCampaignRequest,
-    InformRequest,
-)
 from scheduler import scheduler_loop
 from state import state_lock
 
@@ -30,6 +28,26 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Device Management Controller", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def count_requests(request: Request, call_next):
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception:
+        status_code = 500
+        raise
+    finally:
+        # The route template, not the raw path, so the device and campaign
+        # IDs do not create one counter each.
+        route = request.scope.get("route")
+        metrics.count_incoming(
+            request.method,
+            route.path if route else "unmatched",
+            status_code,
+        )
+    return response
 
 
 # ---------- Campaign API ----------
@@ -109,6 +127,7 @@ def resume_campaign(campaign_id: str):
 @app.post("/devices/{device_id}/inform")
 def receive_inform(device_id: str, request: InformRequest):
     devices.log_inform(device_id, request)
+    metrics.count_inform(request.event)
 
     with state_lock:
         devices.update_inventory(device_id, request)
@@ -141,6 +160,13 @@ def receive_command_response(
     with state_lock:
         status = devices.handle_command_response(device_id, request)
     return {"status": status}
+
+
+# ---------- Observability ----------
+
+@app.get("/metrics")
+def get_metrics():
+    return metrics.snapshot()
 
 
 @app.get("/health")

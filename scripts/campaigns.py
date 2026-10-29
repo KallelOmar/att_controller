@@ -10,6 +10,9 @@ import urllib.parse
 import urllib.request
 from uuid import uuid4
 
+from pydantic import BaseModel, Field, HttpUrl
+
+import metrics
 from config import MIN_SAMPLE_SIZE, SIMULATOR_URL
 from devices import (
     DEVICE_STATES,
@@ -29,6 +32,20 @@ ACTIVE_CAMPAIGN_STATES = ("PENDING", "IN_PROGRESS", "PAUSED")
 
 class CampaignStateError(Exception):
     """The campaign's status does not allow the requested action."""
+
+
+# ---------- Campaign API models ----------
+
+class DeviceFilter(BaseModel):
+    currentVersion: str = Field(min_length=1)
+
+
+class CreateCampaignRequest(BaseModel):
+    targetVersion: str = Field(min_length=1)
+    imageUrl: HttpUrl
+    deviceFilter: DeviceFilter
+    maxConcurrent: int = Field(gt=0)
+    failureThresholdPercent: float = Field(ge=0, le=100)
 
 
 # ---------- Progress ----------
@@ -101,10 +118,15 @@ def update_campaign_status(campaign):
 
 def fetch_target_devices(current_version: str):
     query = urllib.parse.urlencode({"version": current_version})
-    with urllib.request.urlopen(
-        f"{SIMULATOR_URL}/devices?{query}", timeout=10
-    ) as response:
-        return [device["deviceId"] for device in json.load(response)]
+    try:
+        with urllib.request.urlopen(
+            f"{SIMULATOR_URL}/devices?{query}", timeout=10
+        ) as response:
+            metrics.count_outgoing("GET", "/devices", response.status)
+            return [device["deviceId"] for device in json.load(response)]
+    except OSError as exc:
+        metrics.count_outgoing("GET", "/devices", metrics.error_result(exc))
+        raise
 
 
 def load_targets(campaign):
@@ -313,6 +335,7 @@ def issue_download(device_id, firmware_version):
                 "no DOWNLOAD, campaign is PAUSED",
                 campaign=campaign,
             )
+            metrics.count_event("callbacksWhilePaused")
             reason_logged = True
             continue
 
@@ -337,6 +360,7 @@ def issue_download(device_id, firmware_version):
         command_key = str(uuid4())
         attempt["commandKey"] = command_key
         set_device_status(campaign, attempt, "DOWNLOAD_SENT")
+        metrics.count_event("downloadsIssued")
 
         commands.append(
             {

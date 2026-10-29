@@ -5,6 +5,7 @@ import asyncio
 import logging
 import urllib.request
 
+import metrics
 from campaigns import count_in_flight, update_campaign_status
 from config import SCHEDULER_TICK_SEC, SIMULATOR_URL
 from devices import check_timeouts, set_device_status
@@ -33,11 +34,14 @@ def select_devices_to_notify(campaign):
 def send_connection_request(campaign, attempt):
     device_id = attempt["deviceId"]
     url = f"{SIMULATOR_URL}/devices/{device_id}/connection-request"
+    endpoint = "/devices/{deviceId}/connection-request"
     try:
-        urllib.request.urlopen(
+        with urllib.request.urlopen(
             urllib.request.Request(url, method="POST"), timeout=5
-        )
+        ) as response:
+            metrics.count_outgoing("POST", endpoint, response.status)
     except OSError as exc:
+        metrics.count_outgoing("POST", endpoint, metrics.error_result(exc))
         log_device(
             logging.WARNING,
             device_id,
