@@ -117,7 +117,8 @@ def set_device_status(campaign, attempt, status, reason=None, note=""):
 
 
 def retry_or_give_up(campaign, attempt):
-    """A Connection Request got no callback: send it again, or give up.
+    """A Connection Request got no callback or could not be sent: send it
+    again, or give up.
 
     Resending it is safe: the device has received no command yet. Between
     tries the device waits as PENDING, so it does not hold a maxConcurrent

@@ -4,10 +4,10 @@ stateDiagram-v2
     [*] --> PENDING : campaign created,<br/>device listed by GET /devices?version=
 
     PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS,<br/>in flight < maxConcurrent and retryAt passed;<br/>connection request sent
-    NOTIFIED --> PENDING : connection request failed, campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
+    NOTIFIED --> PENDING : campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
 
     NOTIFIED --> DOWNLOAD_SENT : CONNECTION_REQUEST inform,<br/>DOWNLOAD returned with commandKey
-    NOTIFIED --> PENDING : no inform in 60s, retries left:<br/>retry=n/2 after 30s, then 60s<br/>reason=NO_CALLBACK (safe to resend)
+    NOTIFIED --> PENDING : no inform in 60s or request not sent,<br/>retries left:<br/>retry=n/2 after 30s, then 60s<br/>reason=NO_CALLBACK (safe to resend)
     NOTIFIED --> TIMED_OUT : still no inform after 3 connection requests<br/>reason=NO_CALLBACK (offline)
 
     DOWNLOAD_SENT --> ACCEPTED : command-response ACCEPTED

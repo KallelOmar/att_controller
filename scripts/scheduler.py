@@ -9,7 +9,7 @@ import urllib.request
 import metrics
 from campaigns import count_in_flight, update_campaign_status
 from config import SCHEDULER_TICK_SEC, SIMULATOR_URL
-from devices import check_timeouts, set_device_status
+from devices import check_timeouts, retry_or_give_up, set_device_status
 from log import log_device, logger
 from state import campaigns, state_lock
 
@@ -54,10 +54,10 @@ def send_connection_request(campaign, attempt):
             exc,
             campaign=campaign,
         )
-        # Back to the queue; a later tick retries it.
+        # Counts as a try, like a Connection Request with no callback.
         with state_lock:
             if attempt["status"] == "NOTIFIED":
-                set_device_status(campaign, attempt, "PENDING")
+                retry_or_give_up(campaign, attempt)
 
 
 def scheduler_tick():

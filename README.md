@@ -111,10 +111,10 @@ stateDiagram-v2
     [*] --> PENDING : campaign created,<br/>device listed by GET /devices?version=
 
     PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS,<br/>in flight < maxConcurrent and retryAt passed;<br/>connection request sent
-    NOTIFIED --> PENDING : connection request failed, campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
+    NOTIFIED --> PENDING : campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
 
     NOTIFIED --> DOWNLOAD_SENT : CONNECTION_REQUEST inform,<br/>DOWNLOAD returned with commandKey
-    NOTIFIED --> PENDING : no inform in 60s, retries left:<br/>retry=n/2 after 30s, then 60s<br/>reason=NO_CALLBACK (safe to resend)
+    NOTIFIED --> PENDING : no inform in 60s or request not sent,<br/>retries left:<br/>retry=n/2 after 30s, then 60s<br/>reason=NO_CALLBACK (safe to resend)
     NOTIFIED --> TIMED_OUT : still no inform after 3 connection requests<br/>reason=NO_CALLBACK (offline)
 
     DOWNLOAD_SENT --> ACCEPTED : command-response ACCEPTED
@@ -242,9 +242,10 @@ are not:
 | Connection Request (`NOTIFIED`) | Yes: it only asks the device to call back, no command was sent yet. | Back to `PENDING` with `reason=NO_CALLBACK`, nudged again after `retry.backoff_sec`, then twice that. After `retry.max_retries` resends: `TIMED_OUT` (`NO_CALLBACK`). |
 | Download (`DOWNLOAD_SENT`, `ACCEPTED`) | No: the device may already be installing it. A second Download could install twice or race the first. | `TIMED_OUT` (`NO_ACK` or `NO_COMPLETION`), never resent; a late callback with the same `commandKey` still corrects it. |
 
-A device waiting to retry does not hold a `maxConcurrent` slot. A
-Connection Request that cannot be sent puts the device back to `PENDING`
-for the next tick.
+A Connection Request that cannot be sent (connection error, timeout)
+counts as a try too: if it reached the device anyway, the second Inform
+gets no Download, since only a `NOTIFIED` device is given one. A device
+waiting to retry does not hold a `maxConcurrent` slot.
 
 **Failure threshold.** Failure rate = (`FAILED` + `TIMED_OUT`) / finished
 devices. It is checked only once `min_sample_size` devices have
