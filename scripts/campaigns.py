@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, HttpUrl
 
+import db
 import metrics
 from config import MIN_SAMPLE_SIZE, SIMULATOR_URL
 from devices import (
@@ -20,7 +21,7 @@ from devices import (
     new_attempt,
     set_device_status,
 )
-from log import log_campaign, log_device
+from log import log_campaign, log_device, logger
 from state import campaigns, state_lock, utc_now
 
 
@@ -99,6 +100,7 @@ def update_campaign_status(campaign):
         return
 
     campaign["endedAt"] = utc_now()
+    db.save_campaign(campaign)
     log_campaign(
         logging.WARNING if campaign["status"] == "HALTED" else logging.INFO,
         campaign,
@@ -156,6 +158,7 @@ def load_targets(campaign):
         else:
             campaign["status"] = "IN_PROGRESS"
             paused = False
+        db.save_campaign_and_devices(campaign)
 
     if paused:
         log_campaign(
@@ -207,6 +210,7 @@ def create(request):
     }
 
     campaigns.append(campaign)
+    db.save_campaign(campaign)
 
     log_campaign(
         logging.INFO,
@@ -278,6 +282,7 @@ def pause(campaign):
     campaign["statusBeforePause"] = status
     campaign["status"] = "PAUSED"
     campaign["pausedAt"] = utc_now()
+    db.save_campaign(campaign)
     log_campaign(
         logging.INFO,
         campaign,
@@ -305,8 +310,47 @@ def resume(campaign):
     campaign["status"] = campaign["statusBeforePause"]
     campaign["statusBeforePause"] = None
     campaign["pausedAt"] = None
+    db.save_campaign(campaign)
     log_campaign(logging.INFO, campaign, "PAUSED -> %s", campaign["status"])
     return "Campaign resumed"
+
+
+# ---------- Restart ----------
+
+def restore():
+    """Reload the saved campaigns at startup, before the scheduler runs.
+
+    Returns the campaigns whose targets were never loaded: the controller
+    stopped first, or the device list could not be fetched.
+    """
+    restored = db.load_campaigns()
+    campaigns.extend(restored)
+
+    requeued = 0
+    for campaign in restored:
+        if campaign["status"] not in ACTIVE_CAMPAIGN_STATES:
+            continue
+        for attempt in campaign["devices"].values():
+            # Its callback may have arrived while the controller was down.
+            # No Download was sent yet, so nudging it again is safe.
+            # DOWNLOAD_SENT and ACCEPTED are not: they wait, and their
+            # saved commandKey still matches the late callbacks.
+            if attempt["status"] == "NOTIFIED":
+                set_device_status(campaign, attempt, "PENDING")
+                requeued += 1
+
+    logger.info(
+        "[controller] restored campaigns=%d devices=%d requeued=%d",
+        len(restored),
+        sum(len(campaign["devices"]) for campaign in restored),
+        requeued,
+    )
+    return [
+        campaign
+        for campaign in restored
+        if not campaign["devices"]
+        and "PENDING" in (campaign["status"], campaign["statusBeforePause"])
+    ]
 
 
 # ---------- Download ----------

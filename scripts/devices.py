@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+import db
 import metrics
 from config import (
     ACCEPTED_TIMEOUT_SEC,
@@ -94,6 +95,9 @@ def set_device_status(campaign, attempt, status, reason=None):
     attempt["failureReason"] = reason
     attempt["stateSince"] = time.time()
     attempt["updatedAt"] = utc_now()
+    # Every device transition passes here: saving here persists them all,
+    # with the commandKey or TransferComplete set just before the call.
+    db.save_device(campaign, attempt)
 
     log_device(
         logging.INFO,

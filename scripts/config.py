@@ -28,3 +28,6 @@ MIN_SAMPLE_SIZE = config["min_sample_size"]
 MIN_REBOOT_SEC = config["min_reboot_sec"]
 
 LOG_LEVEL = config["log_level"].upper()
+
+# SQLite file holding campaigns and their devices; relative to config.yml.
+DB_PATH = CONFIG_PATH.parent / config["db_path"]

@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 import campaigns
+import db
 import devices
 import metrics
 from campaigns import CreateCampaignRequest
@@ -22,9 +23,23 @@ from state import state_lock
 
 @asynccontextmanager
 async def lifespan(_app):
+    # Restore the saved state before the scheduler starts working on it.
+    db.connect()
+    with state_lock:
+        unloaded = campaigns.restore()
+    # Kept referenced, so the tasks are not garbage-collected mid-run.
+    loads = [
+        asyncio.create_task(asyncio.to_thread(campaigns.load_targets, c))
+        for c in unloaded
+    ]
+
     task = asyncio.create_task(scheduler_loop())
     yield
     task.cancel()
+    for load in loads:
+        load.cancel()
+    with state_lock:
+        db.close()
 
 
 app = FastAPI(title="Device Management Controller", lifespan=lifespan)

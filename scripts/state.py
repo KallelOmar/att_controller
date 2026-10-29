@@ -1,10 +1,10 @@
-"""Shared controller state. db.py will persist it."""
+"""Shared controller state. db.py persists the campaigns."""
 
 import threading
 from datetime import datetime, timezone
 
 
-# Temporary in-memory storage
+# Working copy of the state; campaigns are written through to db.py.
 campaigns = []
 devices = {}
 

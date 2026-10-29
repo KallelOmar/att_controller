@@ -26,3 +26,7 @@ min_reboot_sec: 5
 
 # INFO hides PERIODIC Informs and uvicorn access lines; DEBUG shows them.
 log_level: INFO
+
+# SQLite file that keeps campaigns and their devices across restarts,
+# relative to this file. Delete it to start with no campaigns.
+db_path: data/controller.db
