@@ -1,0 +1,6 @@
+# Controller dependencies, tested with Python 3.10.
+# sqlite3, used by db.py, is part of the standard library.
+fastapi==0.162.0
+pydantic==2.14.1
+PyYAML==6.0.3
+uvicorn==0.54.0
