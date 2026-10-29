@@ -75,7 +75,7 @@ scripts/
   campaigns.py    campaign lifecycle: create, load targets, progress,
                   HALTED/COMPLETED, pause/resume, issuing the Download
   devices.py      device state machine, timeouts, TransferComplete and
-                  BOOT evidence, command-responses
+                  firmware version evidence, command-responses
   scheduler.py    the mini scheduler
   db.py           SQLite persistence
   metrics.py      counters served by GET /metrics
@@ -119,18 +119,18 @@ stateDiagram-v2
 
     DOWNLOAD_SENT --> ACCEPTED : command-response ACCEPTED
     DOWNLOAD_SENT --> FAILED : command-response REJECTED<br/>reason=REJECTED
-    DOWNLOAD_SENT --> TIMED_OUT : no command-response in 60s<br/>reason=NO_ACK
+    DOWNLOAD_SENT --> TIMED_OUT : no command-response in 60s<br/>reason=NO_ACK, probe sent
 
     ACCEPTED --> SUCCEEDED : TransferComplete faultCode=0
     ACCEPTED --> FAILED : TransferComplete faultCode≠0<br/>reason=FAULT
-    ACCEPTED --> SUCCEEDED : BOOT on target version<br/>(no TransferComplete)
+    ACCEPTED --> SUCCEEDED : any Inform on target version<br/>(BOOT, PERIODIC, CONNECTION_REQUEST)
     ACCEPTED --> FAILED : BOOT on old version<br/>reason=REVERTED
     ACCEPTED --> FAILED : BOOT on another version<br/>reason=UNEXPECTED_VERSION
     ACCEPTED --> ACCEPTED : BOOT within 5s of ACCEPTED<br/>ignored as stale (MIN_REBOOT_SEC)
-    ACCEPTED --> TIMED_OUT : no outcome in 600s<br/>reason=NO_COMPLETION
+    ACCEPTED --> TIMED_OUT : no outcome in 600s<br/>reason=NO_COMPLETION, probe sent
 
     TIMED_OUT --> ACCEPTED : late command-response ACCEPTED
-    TIMED_OUT --> SUCCEEDED : late TransferComplete faultCode=0<br/>or late BOOT on target version
+    TIMED_OUT --> SUCCEEDED : late TransferComplete faultCode=0,<br/>or any Inform on target version<br/>(e.g. the reply to the probe)
     TIMED_OUT --> FAILED : late REJECTED, faultCode≠0<br/>or late BOOT on old version
 
     SUCCEEDED --> [*]
@@ -139,6 +139,10 @@ stateDiagram-v2
     note right of TIMED_OUT
         Provisional: a late callback with the
         same commandKey can still correct it.
+        A Download is never resent: the device
+        may be installing it. The probe is one
+        Connection Request; a TIMED_OUT device
+        never gets a Download, so it is safe.
     end note
 
     note left of SUCCEEDED
@@ -212,7 +216,7 @@ stateDiagram-v2
 ## Design decisions and trade-offs
 
 **Success evidence.** A device is `SUCCEEDED` on a TransferComplete with
-`faultCode=0` **or** a BOOT reporting the target version. Requiring both
+`faultCode=0` **or** any Inform reporting the target version. Requiring both
 would fail healthy devices that never send BOOT and devices that never
 send TransferComplete, both of which the simulator produces.
 
@@ -222,6 +226,11 @@ The reported `firmwareVersion` is the evidence: target version →
 `FAILED` with `UNEXPECTED_VERSION`. A BOOT less than `min_reboot_sec`
 after `ACCEPTED` is ignored: it is a duplicated BOOT from before the
 Download, not the reboot that applied it.
+
+| Inform | Target version | Old version | Other version |
+|---|---|---|---|
+| BOOT | `SUCCEEDED` | `FAILED` `REVERTED` | `FAILED` `UNEXPECTED_VERSION` |
+| PERIODIC, CONNECTION_REQUEST | `SUCCEEDED` | no change: the device may not have rebooted yet | no change |
 
 **Correlation and idempotency.** Each Download gets a fresh UUID
 `commandKey`; TransferCompletes and command-responses are matched on it.
@@ -241,11 +250,16 @@ are not:
 |---|---|---|
 | Connection Request (`NOTIFIED`) | Yes: it only asks the device to call back, no command was sent yet. | Back to `PENDING` with `reason=NO_CALLBACK`, nudged again after `retry.backoff_sec`, then twice that. After `retry.max_retries` resends: `TIMED_OUT` (`NO_CALLBACK`). |
 | Download (`DOWNLOAD_SENT`, `ACCEPTED`) | No: the device may already be installing it. A second Download could install twice or race the first. | `TIMED_OUT` (`NO_ACK` or `NO_COMPLETION`), never resent; a late callback with the same `commandKey` still corrects it. |
+| Probe after `NO_ACK` / `NO_COMPLETION` | Yes: one Connection Request, and a `TIMED_OUT` device is never given a Download. | Sent once. If the device's Inform reports the target version, it becomes `SUCCEEDED`; otherwise it stays `TIMED_OUT`. |
 
 A Connection Request that cannot be sent (connection error, timeout)
 counts as a try too: if it reached the device anyway, the second Inform
 gets no Download, since only a `NOTIFIED` device is given one. A device
 waiting to retry does not hold a `maxConcurrent` slot.
+
+The probe recovers devices whose callback was lost, for example while
+the controller was down: the device answers with a CONNECTION_REQUEST
+Inform that reports its firmware version.
 
 **Failure threshold.** Failure rate = (`FAILED` + `TIMED_OUT`) / finished
 devices. It is checked only once `min_sample_size` devices have
@@ -271,7 +285,7 @@ before the scheduler starts. `NOTIFIED` devices go back to `PENDING`
 `DOWNLOAD_SENT` and `ACCEPTED` keep waiting, and their saved
 `commandKey` still matches late callbacks. Callbacks sent while the
 controller is down are lost, since devices do not resend them: those
-devices end `TIMED_OUT` unless a later Inform brings evidence. The
+devices end `TIMED_OUT`, then the probe asks them for their version. The
 device inventory and the metrics are not saved: Informs and traffic
 rebuild them.
 
@@ -283,8 +297,8 @@ inventory instead.
 requests by route template and status code, outgoing requests
 (Connection Requests, device listing) by status code, `timeout` or
 `connection_error`, Informs by event, and protocol events (Downloads
-issued, Connection Request retries, duplicates, unknown `commandKey`s,
-stale BOOTs). Route templates
+issued, Connection Request retries, probes sent, success from Inform
+evidence, duplicates, unknown `commandKey`s, stale BOOTs). Route templates
 keep one counter per endpoint, not per device. Counters restart with the
 controller; `startedAt` gives the window. Campaign progress is served by
 `GET /campaigns/{id}`, not duplicated here.
@@ -321,10 +335,6 @@ failed. PERIODIC Informs log at DEBUG. Colours only on a terminal.
 - **`NO_CALLBACK` counts toward the failure rate.** An offline device
   never received the image, so it says nothing about the firmware.
   Excluding it is a one-line change, marked `TODO` in `campaign_counts`.
-- **PERIODIC is not used as evidence.** A device that upgraded while the
-  controller was down reports the target version in its next PERIODIC
-  Inform; using it would turn those `NO_COMPLETION` timeouts into
-  `SUCCEEDED`.
 - **Late callbacks are not restricted by timeout reason.** A late
   command-response should only correct a `NO_ACK` timeout, and a late
   BOOT only a `NO_COMPLETION` one.

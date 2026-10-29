@@ -12,18 +12,18 @@ stateDiagram-v2
 
     DOWNLOAD_SENT --> ACCEPTED : command-response ACCEPTED
     DOWNLOAD_SENT --> FAILED : command-response REJECTED<br/>reason=REJECTED
-    DOWNLOAD_SENT --> TIMED_OUT : no command-response in 60s<br/>reason=NO_ACK
+    DOWNLOAD_SENT --> TIMED_OUT : no command-response in 60s<br/>reason=NO_ACK, probe sent
 
     ACCEPTED --> SUCCEEDED : TransferComplete faultCode=0
     ACCEPTED --> FAILED : TransferComplete faultCode≠0<br/>reason=FAULT
-    ACCEPTED --> SUCCEEDED : BOOT on target version<br/>(no TransferComplete)
+    ACCEPTED --> SUCCEEDED : any Inform on target version<br/>(BOOT, PERIODIC, CONNECTION_REQUEST)
     ACCEPTED --> FAILED : BOOT on old version<br/>reason=REVERTED
     ACCEPTED --> FAILED : BOOT on another version<br/>reason=UNEXPECTED_VERSION
     ACCEPTED --> ACCEPTED : BOOT within 5s of ACCEPTED<br/>ignored as stale (MIN_REBOOT_SEC)
-    ACCEPTED --> TIMED_OUT : no outcome in 600s<br/>reason=NO_COMPLETION
+    ACCEPTED --> TIMED_OUT : no outcome in 600s<br/>reason=NO_COMPLETION, probe sent
 
     TIMED_OUT --> ACCEPTED : late command-response ACCEPTED
-    TIMED_OUT --> SUCCEEDED : late TransferComplete faultCode=0<br/>or late BOOT on target version
+    TIMED_OUT --> SUCCEEDED : late TransferComplete faultCode=0,<br/>or any Inform on target version<br/>(e.g. the reply to the probe)
     TIMED_OUT --> FAILED : late REJECTED, faultCode≠0<br/>or late BOOT on old version
 
     SUCCEEDED --> [*]
@@ -32,6 +32,10 @@ stateDiagram-v2
     note right of TIMED_OUT
         Provisional: a late callback with the
         same commandKey can still correct it.
+        A Download is never resent: the device
+        may be installing it. The probe is one
+        Connection Request; a TIMED_OUT device
+        never gets a Download, so it is safe.
     end note
 
     note left of SUCCEEDED

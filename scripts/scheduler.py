@@ -36,8 +36,8 @@ def select_devices_to_notify(campaign):
     return selected
 
 
-def send_connection_request(campaign, attempt):
-    device_id = attempt["deviceId"]
+def post_connection_request(campaign, device_id):
+    """Ask the device to call back; return the error, or None if sent."""
     url = f"{SIMULATOR_URL}/devices/{device_id}/connection-request"
     endpoint = "/devices/{deviceId}/connection-request"
     try:
@@ -45,6 +45,7 @@ def send_connection_request(campaign, attempt):
             urllib.request.Request(url, method="POST"), timeout=5
         ) as response:
             metrics.count_outgoing("POST", endpoint, response.status)
+        return None
     except OSError as exc:
         metrics.count_outgoing("POST", endpoint, metrics.error_result(exc))
         log_device(
@@ -54,16 +55,39 @@ def send_connection_request(campaign, attempt):
             exc,
             campaign=campaign,
         )
-        # Counts as a try, like a Connection Request with no callback.
-        with state_lock:
-            if attempt["status"] == "NOTIFIED":
-                retry_or_give_up(campaign, attempt)
+        return exc
+
+
+def send_connection_request(campaign, attempt):
+    if post_connection_request(campaign, attempt["deviceId"]) is None:
+        return
+    # Not sent: counts as a try, like a Connection Request with no callback.
+    with state_lock:
+        if attempt["status"] == "NOTIFIED":
+            retry_or_give_up(campaign, attempt)
+
+
+def send_probe(campaign, attempt):
+    """One Connection Request after NO_ACK or NO_COMPLETION.
+
+    Safe: a TIMED_OUT device is never given a Download. The Inform it
+    sends back reports its firmware version, which can prove the upgrade.
+    """
+    log_device(
+        logging.INFO,
+        attempt["deviceId"],
+        "probe after %s, connection request sent",
+        attempt["failureReason"],
+        campaign=campaign,
+    )
+    metrics.count_event("probesSent")
+    post_connection_request(campaign, attempt["deviceId"])
 
 
 def scheduler_tick():
     with state_lock:
         # Timeouts first, so the slots they free are refilled this tick.
-        check_timeouts()
+        to_probe = check_timeouts()
         # Before nudging: a campaign over its threshold starts no device.
         for campaign in campaigns:
             if campaign["status"] == "IN_PROGRESS":
@@ -78,6 +102,8 @@ def scheduler_tick():
     # Outside the lock: the devices' callbacks need it while we send.
     for campaign, attempt in to_notify:
         send_connection_request(campaign, attempt)
+    for campaign, attempt in to_probe:
+        send_probe(campaign, attempt)
 
 
 async def scheduler_loop():

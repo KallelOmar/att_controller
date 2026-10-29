@@ -153,8 +153,9 @@ def receive_inform(device_id: str, request: InformRequest):
                 device_id, request.transferComplete
             )
 
-        if request.event == "BOOT":
-            devices.handle_boot(device_id, request.firmwareVersion)
+        devices.handle_firmware_version(
+            device_id, request.event, request.firmwareVersion
+        )
 
         # A connection-request Inform is the opportunity to return a command.
         commands = []

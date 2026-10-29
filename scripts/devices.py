@@ -144,7 +144,14 @@ def retry_or_give_up(campaign, attempt):
 
 
 def check_timeouts():
+    """Time out stuck devices; return those to probe.
+
+    A Download is never resent: after NO_ACK or NO_COMPLETION the device
+    may be installing it. It only gets one more Connection Request, the
+    probe, whose Inform reports its firmware version.
+    """
     now = time.time()
+    to_probe = []
     for campaign in campaigns:
         for attempt in list(campaign["devices"].values()):
             timeout = STATE_TIMEOUTS.get(attempt["status"])
@@ -157,6 +164,8 @@ def check_timeouts():
                 retry_or_give_up(campaign, attempt)
             else:
                 set_device_status(campaign, attempt, "TIMED_OUT", reason)
+                to_probe.append((campaign, attempt))
+    return to_probe
 
 
 # ---------- Informs ----------
@@ -264,9 +273,9 @@ def handle_transfer_complete(device_id, tc):
             )
 
 
-def handle_boot(device_id, firmware_version):
-    # A BOOT without TransferComplete after a Download: the reported
-    # firmware version tells whether the upgrade was applied.
+def handle_firmware_version(device_id, event, firmware_version):
+    # After a Download with no TransferComplete yet, the reported firmware
+    # version tells whether the upgrade was applied.
     for campaign in campaigns:
         attempt = campaign["devices"].get(device_id)
         if (
@@ -274,6 +283,16 @@ def handle_boot(device_id, firmware_version):
             or attempt["commandKey"] is None
             or attempt["status"] not in ("ACCEPTED", "TIMED_OUT")
         ):
+            continue
+
+        # Outside a BOOT only the target version is conclusive: on the old
+        # one, the device may simply not have rebooted yet.
+        if event != "BOOT":
+            if firmware_version == attempt["targetVersion"]:
+                set_device_status(
+                    campaign, attempt, "SUCCEEDED", note=f"evidence={event}"
+                )
+                metrics.count_event("evidenceFromInform")
             continue
 
         if (
