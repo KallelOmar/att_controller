@@ -56,6 +56,9 @@ async def count_requests(request: Request, call_next):
     finally:
         # The route template, not the raw path, so the device and campaign
         # IDs do not create one counter each.
+        # TODO: in production, maybe skip /metrics here: tools
+        # that check the controller call them every few seconds and
+        # inflate the counts.
         route = request.scope.get("route")
         metrics.count_incoming(
             request.method,
@@ -183,8 +186,3 @@ def receive_command_response(
 @app.get("/metrics")
 def get_metrics():
     return metrics.snapshot()
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}

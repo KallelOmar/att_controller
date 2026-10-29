@@ -17,8 +17,9 @@ NOTIFIED_TIMEOUT_SEC = config["timeouts"]["notified_sec"]
 DOWNLOAD_SENT_TIMEOUT_SEC = config["timeouts"]["download_sent_sec"]
 ACCEPTED_TIMEOUT_SEC = config["timeouts"]["accepted_sec"]
 
-# A device that does not call back is nudged again after RETRY_BACKOFF_SEC,
-# then twice that, up to MAX_RETRIES times.
+# If a device does not call back, its Connection Request is sent again,
+# up to MAX_RETRIES times. Wait RETRY_BACKOFF_SEC before the first retry,
+# then double it each time.
 MAX_RETRIES = config["retry"]["max_retries"]
 RETRY_BACKOFF_SEC = config["retry"]["backoff_sec"]
 
@@ -28,8 +29,9 @@ SCHEDULER_TICK_SEC = config["scheduler_tick_sec"]
 # so the first failures cannot halt a campaign on their own.
 MIN_SAMPLE_SIZE = config["min_sample_size"]
 
-# A BOOT sooner than this after ACCEPTED cannot be the post-upgrade reboot:
-# it is a duplicated/late BOOT from before the Download.
+# A BOOT that arrives sooner than this after ACCEPTED is ignored: the
+# device cannot download and reboot that fast, so it is an old BOOT
+# repeated, not the reboot that installs the new firmware.
 MIN_REBOOT_SEC = config["min_reboot_sec"]
 
 LOG_LEVEL = config["log_level"].upper()

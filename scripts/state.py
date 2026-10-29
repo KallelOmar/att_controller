@@ -8,8 +8,7 @@ from datetime import datetime, timezone
 campaigns = []
 devices = {}
 
-# Handlers run in a thread pool next to the scheduler thread: hold this
-# lock for every check-then-update of the state above.
+# The endpoints and the scheduler run in parallel threads: take this lock  before reading and then changing the state
 state_lock = threading.Lock()
 
 

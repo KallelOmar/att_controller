@@ -23,8 +23,8 @@ from log import log_device
 from state import campaigns, devices, utc_now
 
 
-# Device states. SUCCEEDED and FAILED are final; TIMED_OUT can still be
-# corrected by a late TransferComplete or BOOT for the same commandKey.
+# Device states. SUCCEEDED and FAILED are final
+# A late TransferComplete or BOOT for the same commandKey can correct TIMED_OUT
 DEVICE_STATES = (
     "PENDING",
     "NOTIFIED",
@@ -36,12 +36,11 @@ DEVICE_STATES = (
 )
 FINAL_STATES = ("SUCCEEDED", "FAILED")
 
-# States in which the controller is waiting on the device. They count
-# toward the campaign's maxConcurrent.
+# Devices in these states are being upgraded
 IN_FLIGHT_STATES = ("NOTIFIED", "DOWNLOAD_SENT", "ACCEPTED")
 
-# Waiting state -> (timeout in seconds, failureReason when it expires).
-# ACCEPTED covers download + reboot, which can take several minutes.
+# Waiting state -> (timeout in seconds, failureReason when it expires)
+# ACCEPTED covers download + reboot, which can take several minutes
 STATE_TIMEOUTS = {
     "NOTIFIED": (NOTIFIED_TIMEOUT_SEC, "NO_CALLBACK"),
     "DOWNLOAD_SENT": (DOWNLOAD_SENT_TIMEOUT_SEC, "NO_ACK"),
@@ -89,6 +88,8 @@ def new_attempt(device_id, campaign):
         "stateSince": time.time(),
         "updatedAt": utc_now(),
         # Connection Requests resent so far, and when the next one may go.
+        # TODO: save both in db.py. Not saved, a restart resets them
+        # At worst 2 extra Connection Requests, which are safe to repeat
         "retries": 0,
         "retryAt": None,
     }
@@ -101,7 +102,7 @@ def set_device_status(campaign, attempt, status, reason=None, note=""):
     attempt["stateSince"] = time.time()
     attempt["updatedAt"] = utc_now()
     # Every device transition passes here: saving here persists them all,
-    # with the commandKey or TransferComplete set just before the call.
+    # with the commandKey or TransferComplete set just before the call
     db.save_device(campaign, attempt)
 
     log_device(
@@ -124,7 +125,7 @@ def retry_or_give_up(campaign, attempt):
     tries the device waits as PENDING, so it does not hold a maxConcurrent
     slot; the scheduler skips it until retryAt.
     """
-    # Not saved yet: a device restored from the database starts at 0.
+    # Not saved yet: a device restored from the database starts at 0
     retries = attempt.get("retries", 0)
     if retries >= MAX_RETRIES:
         set_device_status(campaign, attempt, "TIMED_OUT", "NO_CALLBACK")
@@ -172,12 +173,12 @@ def check_timeouts():
 
 def log_inform(device_id, request):
     """One line per Inform; called before taking the lock."""
-    # PERIODIC Informs are routine and frequent: log them only at DEBUG.
+    # PERIODIC Informs are routine and frequent: log them only at DEBUG
     event_log_level = (
         logging.DEBUG if request.event == "PERIODIC" else logging.INFO
     )
 
-    # One line per Inform, with the TransferComplete result when present.
+    # One line per Inform, with the TransferComplete result when present
     tc = request.transferComplete
     details = ""
     if tc is not None:
@@ -204,10 +205,7 @@ def log_inform(device_id, request):
 
 
 def update_inventory(device_id, request):
-    # Create or update the device inventory. Any Inform registers an
-    # unknown device: after a controller restart, devices only send
-    # PERIODIC until their next reboot, so waiting for BOOT would hide
-    # them.
+    # Create or update the device inventory
     device = devices.get(device_id)
     if device is None:
         device = {
@@ -238,7 +236,8 @@ def handle_transfer_complete(device_id, tc):
 
     for campaign in campaigns:
         candidate = campaign["devices"].get(device_id)
-        if candidate and candidate.get("commandKey") == tc.commandKey: #Correlate the TransferComplete with the correponding Download using commandKey.
+         #Correlate the TransferComplete with the correponding Download using commandKey
+        if candidate and candidate.get("commandKey") == tc.commandKey:
             matching_campaign = campaign
             attempt = candidate
             break
@@ -252,6 +251,9 @@ def handle_transfer_complete(device_id, tc):
         )
         metrics.count_event("unknownCommandKeys")
     elif attempt["status"] in FINAL_STATES:
+        # TODO: if the device is FAILED with REVERTED, use the fault code as the reason.
+        # REVERTED: the device rebooted but came back on its old firmware: the upgrade didn't take effect.
+        # The BOOT on the old version can arrive before the TransferComplete fault. Still FAILED, only the reason changes.
         log_device(
             logging.INFO,
             device_id,
@@ -274,8 +276,7 @@ def handle_transfer_complete(device_id, tc):
 
 
 def handle_firmware_version(device_id, event, firmware_version):
-    # After a Download with no TransferComplete yet, the reported firmware
-    # version tells whether the upgrade was applied.
+    # After a Download with no TransferComplete yet, the reported firmware version tells whether the upgrade was applied.
     for campaign in campaigns:
         attempt = campaign["devices"].get(device_id)
         if (
@@ -285,8 +286,8 @@ def handle_firmware_version(device_id, event, firmware_version):
         ):
             continue
 
-        # Outside a BOOT only the target version is conclusive: on the old
-        # one, the device may simply not have rebooted yet.
+        # In a PERIODIC or CONNECTION_REQUEST Inform, only the target version counts (SUCCEEDED). 
+        # The old version proves nothing: the device may still be downloading and has not rebooted yet.
         if event != "BOOT":
             if firmware_version == attempt["targetVersion"]:
                 set_device_status(
@@ -344,6 +345,8 @@ def handle_command_response(device_id, request):
         if attempt and attempt.get("commandKey") == request.commandKey:
             # Only a first answer to the Download counts; duplicates and
             # answers after the outcome is known are ignored.
+            # TODO: after a timeout, accept it only for NO_ACK. After
+            # NO_COMPLETION the device already answered ACCEPTED.
             if attempt["status"] not in ("DOWNLOAD_SENT", "TIMED_OUT"):
                 log_device(
                     logging.INFO,

@@ -68,9 +68,8 @@ def campaign_counts(campaign):
             reason = attempt["failureReason"]
             failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
 
-    # TODO: exclude TIMED_OUT with reason NO_CALLBACK: the device was
-    # offline and never got the image, so it says nothing about the
-    # firmware and should not count toward halting the campaign.
+    # TODO: maybe don't count NO_CALLBACK as a failure: an offline device never got the firmware 
+    # To discuss (README "Questions to discuss")
     failed = by_state["FAILED"] + by_state["TIMED_OUT"]
     finished = by_state["SUCCEEDED"] + failed
     return {
@@ -119,6 +118,8 @@ def update_campaign_status(campaign):
 # ---------- Creation ----------
 
 def fetch_target_devices(current_version: str):
+    # TODO: add pagination. This call returns every device at once: fine
+    # for 1,000, not for millions.
     query = urllib.parse.urlencode({"version": current_version})
     try:
         with urllib.request.urlopen(
@@ -134,6 +135,8 @@ def fetch_target_devices(current_version: str):
 def load_targets(campaign):
     """Track every target device as PENDING; the scheduler nudges them."""
     current_version = campaign["deviceFilter"]["currentVersion"]
+    # TODO: retry with backoff. Safe, since listing only reads; today a
+    # failure leaves the campaign PENDING until the next controller start.
     try:
         targets = fetch_target_devices(current_version)
     except (OSError, ValueError) as exc:
@@ -270,9 +273,8 @@ def pause(campaign):
             "campaign can be paused"
         )
 
-    # NOTIFIED devices have no Download yet: requeue them, so a
-    # callback during the pause does not end as NO_CALLBACK. Devices
-    # with a Download keep going and are still tracked.
+    # NOTIFIED devices go back to PENDING, so they don't time out during the pause
+    #  Devices that already have a Download continue
     requeued = 0
     for attempt in campaign["devices"].values():
         if attempt["status"] == "NOTIFIED":
@@ -331,10 +333,9 @@ def restore():
         if campaign["status"] not in ACTIVE_CAMPAIGN_STATES:
             continue
         for attempt in campaign["devices"].values():
-            # Its callback may have arrived while the controller was down.
-            # No Download was sent yet, so nudging it again is safe.
-            # DOWNLOAD_SENT and ACCEPTED are not: they wait, and their
-            # saved commandKey still matches the late callbacks.
+            # Its callback may have been lost while the controller was down. It has no Download yet, so sending it a new Connection Request is safe; 
+            # this is not counted as a retry.
+            # DOWNLOAD_SENT and ACCEPTED devices just keep waiting.
             if attempt["status"] == "NOTIFIED":
                 set_device_status(campaign, attempt, "PENDING")
                 requeued += 1
@@ -370,8 +371,7 @@ def issue_download(device_id, firmware_version):
         if firmware_version != expected_version:
             continue
 
-        # Late callback to a Connection Request sent before the
-        # pause: the device was requeued and is nudged on resume.
+        # Late callback to a Connection Request sent before the pause: the device was requeued and is nudged on resume.
         if campaign["status"] == "PAUSED":
             log_device(
                 logging.INFO,
@@ -385,8 +385,7 @@ def issue_download(device_id, firmware_version):
 
         attempt = campaign["devices"].get(device_id)
 
-        # Only devices targeted by the campaign and not yet sent a
-        # Download get one: prevents duplicate Download commands.
+        # Only devices targeted by the campaign and not yet sent a Download get one: prevents duplicate Download commands.
         if attempt is None or attempt["status"] not in (
             "PENDING",
             "NOTIFIED",

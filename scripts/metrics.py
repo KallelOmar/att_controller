@@ -24,8 +24,7 @@ informs = Counter()
 # Protocol events worth watching: duplicates, unknown commandKeys, etc.
 events = Counter()
 
-# Counters are updated from the event loop, the thread pool and the
-# scheduler thread, partly outside state_lock: they have their own lock.
+# Counters are updated from the event loop, the thread pool and the scheduler thread, partly outside state_lock: they have their own lock.
 metrics_lock = threading.Lock()
 
 
@@ -66,6 +65,7 @@ def is_success(result):
 
 def by_endpoint(counter):
     """{"POST /path": {"total", "success", "errored", "byStatus"}}."""
+    # TODO: split "errored" into 4xx, 5xx and network errors, so alerts fire on controller bugs (5xx), not on a normal 409.
     endpoints = {}
     for (method, path, result), count in sorted(
         counter.items(), key=lambda item: tuple(map(str, item[0]))

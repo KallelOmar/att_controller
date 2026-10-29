@@ -21,6 +21,7 @@ def select_devices_to_notify(campaign):
         return []
 
     # A device waiting to retry is skipped until its retryAt.
+    # TODO: at scale, keep a queue of PENDING devices instead of looping over all devices on every tick.
     now = time.time()
     selected = [
         attempt

@@ -3,7 +3,7 @@ stateDiagram-v2
 
     [*] --> PENDING : campaign created,<br/>device listed by GET /devices?version=
 
-    PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS,<br/>in flight < maxConcurrent and retryAt passed;<br/>connection request sent
+    PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS,<br/>in flight < maxConcurrent and retryAt passed,<br/>connection request sent
     NOTIFIED --> PENDING : campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
 
     NOTIFIED --> DOWNLOAD_SENT : CONNECTION_REQUEST inform,<br/>DOWNLOAD returned with commandKey
@@ -28,18 +28,3 @@ stateDiagram-v2
 
     SUCCEEDED --> [*]
     FAILED --> [*]
-
-    note right of TIMED_OUT
-        Provisional: a late callback with the
-        same commandKey can still correct it.
-        A Download is never resent: the device
-        may be installing it. The probe is one
-        Connection Request; a TIMED_OUT device
-        never gets a Download, so it is safe.
-    end note
-
-    note left of SUCCEEDED
-        SUCCEEDED and FAILED are final.
-        Duplicate or late callbacks are
-        logged and ignored.
-    end note
