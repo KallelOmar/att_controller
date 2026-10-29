@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import sys
 import threading
 import time
 import urllib.parse
@@ -60,13 +61,74 @@ MIN_SAMPLE_SIZE = config["min_sample_size"]
 MIN_REBOOT_SEC = config["min_reboot_sec"]
 
 
-# Logging: PERIODIC Informs are logged at DEBUG, so they are hidden at INFO.
+# ---------- Logging ----------
+# Line format: UTC time, level, one [subject] tag, then key=value details.
+#   2026-10-29 10:15:04.502Z INFO  [GW-B74D0FB132E7] ACCEPTED -> SUCCEEDED
+#       campaign=9a86f0c9
+#   2026-10-29 10:16:40.002Z WARN  [campaign 9a86f0c9] IN_PROGRESS -> HALTED
+# Levels: ERROR = the controller itself fails; WARN = unexpected but
+# handled; INFO = normal progress, including device failures, which are
+# expected outcomes; DEBUG = high-volume detail such as PERIODIC Informs.
 LOG_LEVEL = config["log_level"].upper()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+GREEN, YELLOW, RED, DIM, RESET = (
+    "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
 )
+
+
+class LogFormatter(logging.Formatter):
+    LEVEL_NAMES = {"WARNING": "WARN", "CRITICAL": "CRIT"}
+    LEVEL_COLORS = {
+        "DEBUG": DIM, "INFO": GREEN, "WARN": YELLOW, "ERROR": RED, "CRIT": RED
+    }
+    STATE_COLORS = {
+        "SUCCEEDED": GREEN,
+        "COMPLETED": GREEN,
+        "FAILED": RED,
+        "HALTED": RED,
+        "TIMED_OUT": YELLOW,
+    }
+
+    def __init__(self, use_colors):
+        super().__init__(datefmt="%Y-%m-%d %H:%M:%S")
+        self.converter = time.gmtime
+        self.use_colors = use_colors
+
+    def format(self, record):
+        level = self.LEVEL_NAMES.get(record.levelname, record.levelname)
+        message = record.getMessage()
+        # Lines from uvicorn or other libraries get a tag like ours.
+        if not record.name.startswith("controller"):
+            message = f"[{record.name.split('.')[0]}] {message}"
+
+        if self.use_colors:
+            for state, color in self.STATE_COLORS.items():
+                message = message.replace(
+                    f"-> {state}", f"-> {color}{state}{RESET}"
+                )
+            level = f"{self.LEVEL_COLORS.get(level, '')}{level:<5}{RESET}"
+        else:
+            level = f"{level:<5}"
+
+        line = (
+            f"{self.formatTime(record, self.datefmt)}"
+            f".{int(record.msecs):03d}Z {level} {message}"
+        )
+        if record.exc_info:
+            line += "\n" + self.formatException(record.exc_info)
+        return line
+
+
+# Colours only on a terminal: logs redirected to a file stay plain text.
+log_handler = logging.StreamHandler()
+log_handler.setFormatter(LogFormatter(use_colors=sys.stderr.isatty()))
+
+# Replaces the handlers uvicorn installed, so its lines share our format.
+logging.getLogger().handlers = [log_handler]
+for name in ("uvicorn", "uvicorn.access"):
+    logging.getLogger(name).handlers = []
+    logging.getLogger(name).propagate = True
+
 logger = logging.getLogger("controller")
 logger.setLevel(LOG_LEVEL)
 
@@ -74,6 +136,25 @@ logger.setLevel(LOG_LEVEL)
 # so show it only in DEBUG mode.
 if LOG_LEVEL != "DEBUG":
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
+
+def log_campaign(level, campaign, message, *args):
+    logger.log(level, "[campaign %s] " + message, campaign["id"][:8], *args)
+
+
+def log_device(level, device_id, message, *args, campaign=None):
+    # The ID comes from the URL: pass it as an argument, never in the format.
+    # The campaign goes last as a detail, so the device stays the only tag.
+    if campaign is None:
+        logger.log(level, "[%s] " + message, device_id, *args)
+    else:
+        logger.log(
+            level,
+            "[%s] " + message + ", campaign=%s",
+            device_id,
+            *args,
+            campaign["id"][:8],
+        )
 
 # Temporary in-memory storage
 campaigns = []
@@ -110,13 +191,14 @@ def set_device_status(campaign, attempt, status, reason=None):
     attempt["stateSince"] = time.time()
     attempt["updatedAt"] = utc_now()
 
-    logger.info(
-        "Device status: campaignId=%s deviceId=%s %s -> %s reason=%s",
-        campaign["id"],
+    log_device(
+        logging.INFO,
         attempt["deviceId"],
+        "%s -> %s%s",
         previous,
         status,
-        reason,
+        f" reason={reason}" if reason else "",
+        campaign=campaign,
     )
 
 
@@ -171,6 +253,7 @@ def campaign_counts(campaign):
 def update_campaign_status(campaign):
     """Halt above the failure threshold; complete once every device is done."""
     counts = campaign_counts(campaign)
+    previous = campaign["status"]
     if (
         counts["finished"] >= MIN_SAMPLE_SIZE
         and counts["failureRatePercent"] > campaign["failureThresholdPercent"]
@@ -182,11 +265,13 @@ def update_campaign_status(campaign):
         return
 
     campaign["endedAt"] = utc_now()
-    logger.info(
-        "Campaign %s: campaignId=%s failed=%d finished=%d total=%d "
+    log_campaign(
+        logging.WARNING if campaign["status"] == "HALTED" else logging.INFO,
+        campaign,
+        "%s -> %s failed=%d finished=%d total=%d "
         "failureRate=%.1f%% threshold=%s%%",
+        previous,
         campaign["status"],
-        campaign["id"],
         counts["failed"],
         counts["finished"],
         counts["total"],
@@ -221,10 +306,12 @@ def send_connection_request(campaign, attempt):
             urllib.request.Request(url, method="POST"), timeout=5
         )
     except OSError as exc:
-        logger.warning(
-            "Connection Request failed: deviceId=%s error=%s",
+        log_device(
+            logging.WARNING,
             device_id,
+            "connection request failed: %s",
             exc,
+            campaign=campaign,
         )
         # Back to the queue; a later tick retries it.
         with state_lock:
@@ -259,7 +346,7 @@ async def scheduler_loop():
             # urlopen blocks: run in a thread so the API keeps serving.
             await asyncio.to_thread(scheduler_tick)
         except Exception:
-            logger.exception("Scheduler tick failed")
+            logger.exception("[controller] scheduler tick failed")
 
 
 @asynccontextmanager
@@ -329,9 +416,11 @@ def load_targets(campaign):
     try:
         targets = fetch_target_devices(current_version)
     except (OSError, ValueError) as exc:
-        logger.error(
-            "Cannot list target devices: campaignId=%s error=%s",
-            campaign["id"],
+        log_campaign(
+            logging.ERROR,
+            campaign,
+            "cannot list target devices from %s: %s",
+            SIMULATOR_URL,
             exc,
         )
         return
@@ -343,11 +432,10 @@ def load_targets(campaign):
             )
         campaign["status"] = "IN_PROGRESS"
 
-    logger.info(
-        "Campaign targets loaded: campaignId=%s currentVersion=%s "
-        "devices=%d maxConcurrent=%d",
-        campaign["id"],
-        current_version,
+    log_campaign(
+        logging.INFO,
+        campaign,
+        "PENDING -> IN_PROGRESS targets=%d maxConcurrent=%d",
         len(targets),
         campaign["maxConcurrent"],
     )
@@ -367,9 +455,11 @@ def create_campaign(
                 and existing["targetVersion"] == request.targetVersion
                 and existing["status"] in ("PENDING", "IN_PROGRESS")
             ):
-                logger.info(
-                    "Matching active campaign already exists: id=%s",
-                    existing["id"],
+                log_campaign(
+                    logging.INFO,
+                    existing,
+                    "creation request matches this active campaign, "
+                    "none created",
                 )
                 return {
                     "id": existing["id"],
@@ -395,11 +485,16 @@ def create_campaign(
     # Runs after the response is sent, so the API call returns immediately.
     background_tasks.add_task(load_targets, campaign)
 
-    logger.info(
-        "Campaign created: id=%s currentVersion=%s targetVersion=%s",
+    log_campaign(
+        logging.INFO,
+        campaign,
+        "created id=%s currentVersion=%s targetVersion=%s maxConcurrent=%d "
+        "failureThreshold=%s%%",
         campaign["id"],
         current_version,
         campaign["targetVersion"],
+        campaign["maxConcurrent"],
+        campaign["failureThresholdPercent"],
     )
 
     return {
@@ -447,19 +542,28 @@ def receive_inform(device_id: str, request: InformRequest):
         logging.DEBUG if request.event == "PERIODIC" else logging.INFO
     )
 
-    logger.log(
+    # One line per Inform, with the TransferComplete result when present.
+    tc = request.transferComplete
+    details = ""
+    if tc is not None:
+        details = f" commandKey={tc.commandKey} faultCode={tc.faultCode}"
+        if tc.startTime is not None and tc.completeTime is not None:
+            details += f" duration={tc.completeTime - tc.startTime:.0f}s"
+    log_device(
         event_log_level,
-        "INFORM received: deviceId=%s event=%s firmwareVersion=%s",
         device_id,
+        "inform event=%s firmwareVersion=%s%s",
         request.event,
         request.firmwareVersion,
+        details,
     )
 
     # The path ID is authoritative. Log any mismatch in the body.
     if request.deviceId != device_id:
-        logger.warning(
-            "Device ID mismatch: path=%s body=%s",
+        log_device(
+            logging.WARNING,
             device_id,
+            "body deviceId=%s differs from the URL",
             request.deviceId,
         )
 
@@ -478,9 +582,10 @@ def receive_inform(device_id: str, request: InformRequest):
                 "lastBoot": None,
             }
             devices[device_id] = device
-            logger.info(
-                "Device registered: deviceId=%s via event=%s",
+            log_device(
+                logging.DEBUG,
                 device_id,
+                "registered in the inventory via event=%s",
                 request.event,
             )
 
@@ -490,27 +595,8 @@ def receive_inform(device_id: str, request: InformRequest):
         if request.event == "BOOT":
             device["lastBoot"] = device["lastSeen"]
 
-        logger.log(
-            event_log_level,
-            "Device updated: deviceId=%s firmwareVersion=%s",
-            device_id,
-            request.firmwareVersion,
-        )
-
         # Process TransferComplete if the event contains it.
-        if request.transferComplete is not None:
-            tc = request.transferComplete
-
-            logger.info(
-                "TRANSFER_COMPLETE received: deviceId=%s commandKey=%s "
-                "faultCode=%s startTime=%s completeTime=%s",
-                device_id,
-                tc.commandKey,
-                tc.faultCode,
-                tc.startTime,
-                tc.completeTime,
-            )
-
+        if tc is not None:
             matching_campaign = None
             attempt = None
 
@@ -522,19 +608,19 @@ def receive_inform(device_id: str, request: InformRequest):
                     break
 
             if attempt is None:
-                logger.warning(
-                    "Unknown commandKey in TransferComplete: deviceId=%s "
-                    "commandKey=%s",
+                log_device(
+                    logging.WARNING,
                     device_id,
+                    "TransferComplete with unknown commandKey=%s ignored",
                     tc.commandKey,
                 )
             elif attempt["status"] in FINAL_STATES:
-                logger.info(
-                    "Duplicate/late TransferComplete ignored: deviceId=%s "
-                    "commandKey=%s existingStatus=%s",
+                log_device(
+                    logging.INFO,
                     device_id,
-                    tc.commandKey,
+                    "duplicate/late TransferComplete ignored, already %s",
                     attempt["status"],
+                    campaign=matching_campaign,
                 )
             else:
                 attempt["transferComplete"] = tc.model_dump()
@@ -564,10 +650,12 @@ def receive_inform(device_id: str, request: InformRequest):
                     attempt["status"] == "ACCEPTED"
                     and time.time() - attempt["stateSince"] < MIN_REBOOT_SEC
                 ):
-                    logger.info(
-                        "Stale BOOT ignored: campaignId=%s deviceId=%s",
-                        campaign["id"],
+                    log_device(
+                        logging.INFO,
                         device_id,
+                        "stale BOOT ignored, sooner than %ss after ACCEPTED",
+                        MIN_REBOOT_SEC,
+                        campaign=campaign,
                     )
                     continue
 
@@ -588,6 +676,7 @@ def receive_inform(device_id: str, request: InformRequest):
 
         # A connection-request Inform is the opportunity to return a command.
         if request.event == "CONNECTION_REQUEST":
+            reason_logged = False
             for campaign in campaigns:
                 if campaign["status"] not in ("PENDING", "IN_PROGRESS"):
                     continue
@@ -605,13 +694,14 @@ def receive_inform(device_id: str, request: InformRequest):
                     "PENDING",
                     "NOTIFIED",
                 ):
-                    logger.info(
-                        "Download not issued: campaignId=%s deviceId=%s "
-                        "status=%s",
-                        campaign["id"],
+                    log_device(
+                        logging.INFO,
                         device_id,
+                        "no DOWNLOAD, device is %s",
                         attempt["status"] if attempt else "NOT_TARGETED",
+                        campaign=campaign,
                     )
+                    reason_logged = True
                     continue
 
                 command_key = str(uuid4())
@@ -627,23 +717,23 @@ def receive_inform(device_id: str, request: InformRequest):
                     }
                 )
 
-                logger.info(
-                    "DOWNLOAD command prepared: campaignId=%s deviceId=%s "
-                    "commandKey=%s targetVersion=%s",
-                    campaign["id"],
+                log_device(
+                    logging.INFO,
                     device_id,
+                    "DOWNLOAD issued commandKey=%s targetVersion=%s",
                     command_key,
                     campaign["targetVersion"],
+                    campaign=campaign,
                 )
 
                 # One command per Inform in this initial version.
                 break
 
-            if not commands:
-                logger.info(
-                    "No Download command issued: deviceId=%s "
-                    "firmwareVersion=%s",
+            if not commands and not reason_logged:
+                log_device(
+                    logging.INFO,
                     device_id,
+                    "no DOWNLOAD, no active campaign for firmwareVersion=%s",
                     request.firmwareVersion,
                 )
 
@@ -655,13 +745,13 @@ def receive_command_response(
     device_id: str,
     request: CommandResponseRequest,
 ):
-    logger.info(
-        "COMMAND_RESPONSE received: deviceId=%s commandKey=%s status=%s "
-        "reason=%s",
+    log_device(
+        logging.INFO,
         device_id,
-        request.commandKey,
+        "command-response status=%s commandKey=%s%s",
         request.status,
-        request.reason,
+        request.commandKey,
+        f" reason={request.reason}" if request.reason else "",
     )
 
     with state_lock:
@@ -672,10 +762,13 @@ def receive_command_response(
                 # Only a first answer to the Download counts; duplicates and
                 # answers after the outcome is known are ignored.
                 if attempt["status"] not in ("DOWNLOAD_SENT", "TIMED_OUT"):
-                    logger.info(
-                        "Command response ignored: deviceId=%s status=%s",
+                    log_device(
+                        logging.INFO,
                         device_id,
+                        "duplicate/late command-response ignored, "
+                        "already %s",
                         attempt["status"],
+                        campaign=campaign,
                     )
                     return {"status": "recorded"}
 
@@ -690,9 +783,10 @@ def receive_command_response(
                     )
                 return {"status": "recorded"}
 
-    logger.warning(
-        "Command response has unknown commandKey: deviceId=%s commandKey=%s",
+    log_device(
+        logging.WARNING,
         device_id,
+        "command-response with unknown commandKey=%s ignored",
         request.commandKey,
     )
     return {"status": "unknown_command"}
