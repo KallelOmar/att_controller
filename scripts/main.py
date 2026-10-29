@@ -43,6 +43,11 @@ FINAL_STATES = ("SUCCEEDED", "FAILED")
 # toward the campaign's maxConcurrent.
 IN_FLIGHT_STATES = ("NOTIFIED", "DOWNLOAD_SENT", "ACCEPTED")
 
+# Campaign states that still own their devices: a second campaign for the
+# same upgrade is refused while one of these exists. HALTED and COMPLETED
+# are final.
+ACTIVE_CAMPAIGN_STATES = ("PENDING", "IN_PROGRESS", "PAUSED")
+
 # Waiting state -> (timeout in seconds, failureReason when it expires).
 # ACCEPTED covers download + reboot, which can take several minutes.
 STATE_TIMEOUTS = {
@@ -64,8 +69,9 @@ MIN_REBOOT_SEC = config["min_reboot_sec"]
 # ---------- Logging ----------
 # Line format: UTC time, level, one [subject] tag, then key=value details.
 #   2026-10-29 10:15:04.502Z INFO  [GW-B74D0FB132E7] ACCEPTED -> SUCCEEDED
-#       campaign=9a86f0c9
-#   2026-10-29 10:16:40.002Z WARN  [campaign 9a86f0c9] IN_PROGRESS -> HALTED
+#       campaign=9a86f0c9-1b2c-4d3e-8f40-5a6b7c8d9e0f
+#   2026-10-29 10:16:40.002Z WARN
+#       [campaign 9a86f0c9-1b2c-4d3e-8f40-5a6b7c8d9e0f] IN_PROGRESS -> HALTED
 # Levels: ERROR = the controller itself fails; WARN = unexpected but
 # handled; INFO = normal progress, including device failures, which are
 # expected outcomes; DEBUG = high-volume detail such as PERIODIC Informs.
@@ -139,7 +145,7 @@ if LOG_LEVEL != "DEBUG":
 
 
 def log_campaign(level, campaign, message, *args):
-    logger.log(level, "[campaign %s] " + message, campaign["id"][:8], *args)
+    logger.log(level, "[campaign %s] " + message, campaign["id"], *args)
 
 
 def log_device(level, device_id, message, *args, campaign=None):
@@ -153,7 +159,7 @@ def log_device(level, device_id, message, *args, campaign=None):
             "[%s] " + message + ", campaign=%s",
             device_id,
             *args,
-            campaign["id"][:8],
+            campaign["id"],
         )
 
 # Temporary in-memory storage
@@ -430,15 +436,29 @@ def load_targets(campaign):
             campaign["devices"].setdefault(
                 device_id, new_attempt(device_id, campaign)
             )
-        campaign["status"] = "IN_PROGRESS"
+        # Paused while loading: stay PAUSED, resume will start it.
+        if campaign["status"] == "PAUSED":
+            campaign["statusBeforePause"] = "IN_PROGRESS"
+            paused = True
+        else:
+            campaign["status"] = "IN_PROGRESS"
+            paused = False
 
-    log_campaign(
-        logging.INFO,
-        campaign,
-        "PENDING -> IN_PROGRESS targets=%d maxConcurrent=%d",
-        len(targets),
-        campaign["maxConcurrent"],
-    )
+    if paused:
+        log_campaign(
+            logging.INFO,
+            campaign,
+            "targets=%d loaded while PAUSED, resume will start them",
+            len(targets),
+        )
+    else:
+        log_campaign(
+            logging.INFO,
+            campaign,
+            "PENDING -> IN_PROGRESS targets=%d maxConcurrent=%d",
+            len(targets),
+            campaign["maxConcurrent"],
+        )
 
 
 @app.post("/campaigns", status_code=201)
@@ -453,7 +473,7 @@ def create_campaign(
             if (
                 existing["deviceFilter"]["currentVersion"] == current_version
                 and existing["targetVersion"] == request.targetVersion
-                and existing["status"] in ("PENDING", "IN_PROGRESS")
+                and existing["status"] in ACTIVE_CAMPAIGN_STATES
             ):
                 log_campaign(
                     logging.INFO,
@@ -475,7 +495,9 @@ def create_campaign(
             "maxConcurrent": request.maxConcurrent,
             "failureThresholdPercent": request.failureThresholdPercent,
             "status": "PENDING",
+            "statusBeforePause": None,
             "createdAt": utc_now(),
+            "pausedAt": None,
             "endedAt": None,
             "devices": {},
         }
@@ -488,9 +510,8 @@ def create_campaign(
     log_campaign(
         logging.INFO,
         campaign,
-        "created id=%s currentVersion=%s targetVersion=%s maxConcurrent=%d "
+        "created currentVersion=%s targetVersion=%s maxConcurrent=%d "
         "failureThreshold=%s%%",
-        campaign["id"],
         current_version,
         campaign["targetVersion"],
         campaign["maxConcurrent"],
@@ -504,14 +525,21 @@ def create_campaign(
     }
 
 
+def find_campaign(campaign_id, action):
+    """Log the API call, then return the campaign or raise 404."""
+    # The ID comes from the URL: pass it as an argument, never in the format.
+    logger.info("[campaign %s] %s", campaign_id, action)
+    campaign = next((c for c in campaigns if c["id"] == campaign_id), None)
+    if campaign is None:
+        logger.info("[campaign %s] not found", campaign_id)
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return campaign
+
+
 @app.get("/campaigns/{campaign_id}")
 def get_campaign(campaign_id: str):
     with state_lock:
-        campaign = next(
-            (c for c in campaigns if c["id"] == campaign_id), None
-        )
-        if campaign is None:
-            raise HTTPException(status_code=404, detail="Campaign not found")
+        campaign = find_campaign(campaign_id, "get campaign details")
 
         # One snapshot under the lock, so status and counts agree.
         progress = campaign_counts(campaign)
@@ -528,8 +556,95 @@ def get_campaign(campaign_id: str):
             "maxConcurrent": campaign["maxConcurrent"],
             "failureThresholdPercent": campaign["failureThresholdPercent"],
             "createdAt": campaign["createdAt"],
+            "pausedAt": campaign["pausedAt"],
             "endedAt": campaign["endedAt"],
             "progress": progress,
+        }
+
+
+@app.post("/campaigns/{campaign_id}/pause")
+def pause_campaign(campaign_id: str):
+    with state_lock:
+        campaign = find_campaign(campaign_id, "pause campaign")
+        status = campaign["status"]
+
+        if status == "PAUSED":
+            log_campaign(
+                logging.INFO, campaign, "pause ignored, already PAUSED"
+            )
+            return {
+                "id": campaign["id"],
+                "status": status,
+                "message": "Campaign is already paused",
+            }
+
+        if status not in ("PENDING", "IN_PROGRESS"):
+            log_campaign(
+                logging.INFO, campaign, "pause refused, campaign is %s", status
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"Campaign is {status}: only a PENDING or "
+                "IN_PROGRESS campaign can be paused",
+            )
+
+        # NOTIFIED devices have no Download yet: requeue them, so a
+        # callback during the pause does not end as NO_CALLBACK. Devices
+        # with a Download keep going and are still tracked.
+        requeued = 0
+        for attempt in campaign["devices"].values():
+            if attempt["status"] == "NOTIFIED":
+                set_device_status(campaign, attempt, "PENDING")
+                requeued += 1
+
+        campaign["statusBeforePause"] = status
+        campaign["status"] = "PAUSED"
+        campaign["pausedAt"] = utc_now()
+        log_campaign(
+            logging.INFO,
+            campaign,
+            "%s -> PAUSED requeued=%d inFlight=%d",
+            status,
+            requeued,
+            count_in_flight(campaign),
+        )
+        return {
+            "id": campaign["id"],
+            "status": campaign["status"],
+            "message": "Campaign paused",
+        }
+
+
+@app.post("/campaigns/{campaign_id}/resume")
+def resume_campaign(campaign_id: str):
+    with state_lock:
+        campaign = find_campaign(campaign_id, "resume campaign")
+        status = campaign["status"]
+
+        if status != "PAUSED":
+            log_campaign(
+                logging.INFO,
+                campaign,
+                "resume refused, campaign is %s",
+                status,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"Campaign is {status}: only a PAUSED campaign "
+                "can be resumed",
+            )
+
+        # No cursor needed: the next tick nudges the devices still PENDING.
+        campaign["status"] = campaign["statusBeforePause"]
+        campaign["statusBeforePause"] = None
+        campaign["pausedAt"] = None
+        log_campaign(
+            logging.INFO, campaign, "PAUSED -> %s", campaign["status"]
+        )
+        return {
+            "id": campaign["id"],
+            "status": campaign["status"],
+            "message": "Campaign resumed",
         }
 
 
@@ -678,12 +793,24 @@ def receive_inform(device_id: str, request: InformRequest):
         if request.event == "CONNECTION_REQUEST":
             reason_logged = False
             for campaign in campaigns:
-                if campaign["status"] not in ("PENDING", "IN_PROGRESS"):
+                if campaign["status"] not in ACTIVE_CAMPAIGN_STATES:
                     continue
 
                 expected_version = campaign["deviceFilter"]["currentVersion"]
 
                 if request.firmwareVersion != expected_version:
+                    continue
+
+                # Late callback to a Connection Request sent before the
+                # pause: the device was requeued and is nudged on resume.
+                if campaign["status"] == "PAUSED":
+                    log_device(
+                        logging.INFO,
+                        device_id,
+                        "no DOWNLOAD, campaign is PAUSED",
+                        campaign=campaign,
+                    )
+                    reason_logged = True
                     continue
 
                 attempt = campaign["devices"].get(device_id)

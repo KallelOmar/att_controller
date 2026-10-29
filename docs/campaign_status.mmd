@@ -10,6 +10,12 @@ stateDiagram-v2
     IN_PROGRESS --> HALTED : scheduler tick: finished ≥ min_sample_size<br/>and failure rate > failureThresholdPercent
     IN_PROGRESS --> COMPLETED : scheduler tick: no PENDING<br/>and no device in flight
 
+    PENDING --> PAUSED : POST /campaigns/{id}/pause
+    IN_PROGRESS --> PAUSED : POST /campaigns/{id}/pause<br/>(NOTIFIED devices back to PENDING)
+    PAUSED --> PAUSED : pause again: no-op, 200 "already paused"
+    PAUSED --> IN_PROGRESS : POST /campaigns/{id}/resume<br/>(status before the pause)
+    PAUSED --> PENDING : POST /campaigns/{id}/resume<br/>(paused before targets loaded,<br/>and loading failed)
+
     HALTED --> [*]
     COMPLETED --> [*]
 
@@ -24,6 +30,17 @@ stateDiagram-v2
         No new device is nudged. Devices already
         in flight finish and are still tracked.
         HALTED and COMPLETED are final.
+    end note
+
+    note right of PAUSED
+        No new device is nudged. Devices that already
+        have a Download finish and are still tracked;
+        timeouts keep running. Threshold and completion
+        are checked again on the first tick after resume.
+        Resume needs no cursor: the remaining work is
+        the devices still PENDING.
+        HALTED / COMPLETED cannot be paused (409),
+        only PAUSED can be resumed (409).
     end note
 
     note left of PENDING
