@@ -110,11 +110,12 @@ stateDiagram-v2
 
     [*] --> PENDING : campaign created,<br/>device listed by GET /devices?version=
 
-    PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS<br/>and in flight < maxConcurrent;<br/>connection request sent
+    PENDING --> NOTIFIED : scheduler tick, campaign IN_PROGRESS,<br/>in flight < maxConcurrent and retryAt passed;<br/>connection request sent
     NOTIFIED --> PENDING : connection request failed, campaign paused<br/>or controller restarted: no Download yet,<br/>so nudged again on a later tick
 
     NOTIFIED --> DOWNLOAD_SENT : CONNECTION_REQUEST inform,<br/>DOWNLOAD returned with commandKey
-    NOTIFIED --> TIMED_OUT : no inform in 60s<br/>reason=NO_CALLBACK (offline)
+    NOTIFIED --> PENDING : no inform in 60s, retries left:<br/>retry=n/2 after 30s, then 60s<br/>reason=NO_CALLBACK (safe to resend)
+    NOTIFIED --> TIMED_OUT : still no inform after 3 connection requests<br/>reason=NO_CALLBACK (offline)
 
     DOWNLOAD_SENT --> ACCEPTED : command-response ACCEPTED
     DOWNLOAD_SENT --> FAILED : command-response REJECTED<br/>reason=REJECTED
@@ -233,10 +234,17 @@ second Download.
 `commandKey` corrects it to the real outcome. A slow device is not a
 failed device, and the simulator delays some callbacks by minutes.
 
-**Retry safety** (requirement 7). Sending a Connection Request is safe to
-repeat: if it fails, the device goes back to `PENDING` and the next tick
-nudges it again. A Download is never resent: the device may already be
-installing it.
+**Retry safety** (requirement 7). Some steps are safe to repeat, some
+are not:
+
+| Step | Safe to retry? | On timeout |
+|---|---|---|
+| Connection Request (`NOTIFIED`) | Yes: it only asks the device to call back, no command was sent yet. | Back to `PENDING` with `reason=NO_CALLBACK`, nudged again after `retry.backoff_sec`, then twice that. After `retry.max_retries` resends: `TIMED_OUT` (`NO_CALLBACK`). |
+| Download (`DOWNLOAD_SENT`, `ACCEPTED`) | No: the device may already be installing it. A second Download could install twice or race the first. | `TIMED_OUT` (`NO_ACK` or `NO_COMPLETION`), never resent; a late callback with the same `commandKey` still corrects it. |
+
+A device waiting to retry does not hold a `maxConcurrent` slot. A
+Connection Request that cannot be sent puts the device back to `PENDING`
+for the next tick.
 
 **Failure threshold.** Failure rate = (`FAILED` + `TIMED_OUT`) / finished
 devices. It is checked only once `min_sample_size` devices have
@@ -274,7 +282,8 @@ inventory instead.
 requests by route template and status code, outgoing requests
 (Connection Requests, device listing) by status code, `timeout` or
 `connection_error`, Informs by event, and protocol events (Downloads
-issued, duplicates, unknown `commandKey`s, stale BOOTs). Route templates
+issued, Connection Request retries, duplicates, unknown `commandKey`s,
+stale BOOTs). Route templates
 keep one counter per endpoint, not per device. Counters restart with the
 controller; `startedAt` gives the window. Campaign progress is served by
 `GET /campaigns/{id}`, not duplicated here.
@@ -295,6 +304,8 @@ failed. PERIODIC Informs log at DEBUG. Colours only on a terminal.
 | `timeouts.notified_sec` | 60 | The simulator calls back within 3 s; offline devices never do. |
 | `timeouts.download_sent_sec` | 60 | The command-response follows the Download almost immediately. |
 | `timeouts.accepted_sec` | 600 | Download (up to 20 s) plus reboot (up to 240 s) in the simulator, with margin for late callbacks. |
+| `retry.max_retries` | 2 | Resends of the Connection Request after the first: 3 in total before `NO_CALLBACK`. |
+| `retry.backoff_sec` | 30 | Wait before the first resend, doubled each time, so a briefly offline device has time to come back. |
 | `scheduler_tick_sec` | 2 | A freed slot waits at most one tick before it is refilled. |
 | `min_sample_size` | 20 | The threshold is not judged on the first few outcomes. A fleet smaller than this never halts. |
 | `min_reboot_sec` | 5 | The real BOOT comes at least 7 s after `ACCEPTED` (download ≥ 2 s + reboot ≥ 5 s); a duplicated callback comes at most 5 s after the original. |
@@ -303,9 +314,9 @@ failed. PERIODIC Informs log at DEBUG. Colours only on a terminal.
 
 ## Known limitations and next steps
 
-- **Retry of unreachable devices.** A device that never calls back ends
-  `TIMED_OUT` (`NO_CALLBACK`) after one Connection Request; it is not
-  nudged again with a backoff.
+- **Retry count is not persisted yet.** After a controller restart, a
+  device waiting to retry starts again from 0 retries and is nudged on
+  the next tick.
 - **`NO_CALLBACK` counts toward the failure rate.** An offline device
   never received the image, so it says nothing about the firmware.
   Excluding it is a one-line change, marked `TODO` in `campaign_counts`.

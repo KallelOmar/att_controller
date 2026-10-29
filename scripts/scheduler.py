@@ -3,6 +3,7 @@ and nudges PENDING devices while under maxConcurrent."""
 
 import asyncio
 import logging
+import time
 import urllib.request
 
 import metrics
@@ -19,14 +20,18 @@ def select_devices_to_notify(campaign):
     if free <= 0:
         return []
 
+    # A device waiting to retry is skipped until its retryAt.
+    now = time.time()
     selected = [
         attempt
         for attempt in campaign["devices"].values()
         if attempt["status"] == "PENDING"
+        and (attempt.get("retryAt") or 0) <= now
     ][:free]
 
     # Set before sending: the device may call back before urlopen returns.
     for attempt in selected:
+        attempt["retryAt"] = None
         set_device_status(campaign, attempt, "NOTIFIED")
     return selected
 

@@ -10,6 +10,12 @@ timeouts:
   download_sent_sec: 60   # waiting for the command-response
   accepted_sec: 600       # download + reboot; simulator max is 20s + 240s
 
+# Retry of the Connection Request, the only step that is safe to repeat:
+# it only asks the device to call back. A Download is never resent.
+retry:
+  max_retries: 2          # resends after the first: 3 Connection Requests
+  backoff_sec: 30         # wait before the first resend, doubled each time
+
 # How often the scheduler runs: it times out stuck devices, then nudges
 # PENDING devices while a campaign is under maxConcurrent. A freed slot
 # waits at most one tick before it is refilled.

@@ -17,6 +17,11 @@ NOTIFIED_TIMEOUT_SEC = config["timeouts"]["notified_sec"]
 DOWNLOAD_SENT_TIMEOUT_SEC = config["timeouts"]["download_sent_sec"]
 ACCEPTED_TIMEOUT_SEC = config["timeouts"]["accepted_sec"]
 
+# A device that does not call back is nudged again after RETRY_BACKOFF_SEC,
+# then twice that, up to MAX_RETRIES times.
+MAX_RETRIES = config["retry"]["max_retries"]
+RETRY_BACKOFF_SEC = config["retry"]["backoff_sec"]
+
 SCHEDULER_TICK_SEC = config["scheduler_tick_sec"]
 
 # The failure threshold is checked only once this many devices finished,

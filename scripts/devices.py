@@ -14,8 +14,10 @@ import metrics
 from config import (
     ACCEPTED_TIMEOUT_SEC,
     DOWNLOAD_SENT_TIMEOUT_SEC,
+    MAX_RETRIES,
     MIN_REBOOT_SEC,
     NOTIFIED_TIMEOUT_SEC,
+    RETRY_BACKOFF_SEC,
 )
 from log import log_device
 from state import campaigns, devices, utc_now
@@ -86,10 +88,13 @@ def new_attempt(device_id, campaign):
         "failureReason": None,
         "stateSince": time.time(),
         "updatedAt": utc_now(),
+        # Connection Requests resent so far, and when the next one may go.
+        "retries": 0,
+        "retryAt": None,
     }
 
 
-def set_device_status(campaign, attempt, status, reason=None):
+def set_device_status(campaign, attempt, status, reason=None, note=""):
     previous = attempt["status"]
     attempt["status"] = status
     attempt["failureReason"] = reason
@@ -102,12 +107,39 @@ def set_device_status(campaign, attempt, status, reason=None):
     log_device(
         logging.INFO,
         attempt["deviceId"],
-        "%s -> %s%s",
+        "%s -> %s%s%s",
         previous,
         status,
         f" reason={reason}" if reason else "",
+        f" {note}" if note else "",
         campaign=campaign,
     )
+
+
+def retry_or_give_up(campaign, attempt):
+    """A Connection Request got no callback: send it again, or give up.
+
+    Resending it is safe: the device has received no command yet. Between
+    tries the device waits as PENDING, so it does not hold a maxConcurrent
+    slot; the scheduler skips it until retryAt.
+    """
+    # Not saved yet: a device restored from the database starts at 0.
+    retries = attempt.get("retries", 0)
+    if retries >= MAX_RETRIES:
+        set_device_status(campaign, attempt, "TIMED_OUT", "NO_CALLBACK")
+        return
+
+    attempt["retries"] = retries + 1
+    delay = RETRY_BACKOFF_SEC * 2 ** retries
+    attempt["retryAt"] = time.time() + delay
+    set_device_status(
+        campaign,
+        attempt,
+        "PENDING",
+        "NO_CALLBACK",
+        note=f"retry={retries + 1}/{MAX_RETRIES} in={delay}s",
+    )
+    metrics.count_event("connectionRequestRetries")
 
 
 def check_timeouts():
@@ -118,7 +150,11 @@ def check_timeouts():
             if timeout is None:
                 continue
             seconds, reason = timeout
-            if now - attempt["stateSince"] > seconds:
+            if now - attempt["stateSince"] <= seconds:
+                continue
+            if attempt["status"] == "NOTIFIED":
+                retry_or_give_up(campaign, attempt)
+            else:
                 set_device_status(campaign, attempt, "TIMED_OUT", reason)
 
 
