@@ -1,0 +1,42 @@
+# Run with Docker Compose
+
+From `att_controller/`, build the image and start both containers:
+
+```bash
+sudo docker compose -f docker/docker-compose.yml up -d --build
+```
+
+This starts two containers from the same image: `controller` (port 8080) and
+`simulator` (port 9000). The simulator starts once the controller answers,
+and its 1,000 devices immediately send a BOOT Inform to the controller.
+
+Follow the controller logs:
+
+```bash
+sudo docker compose -f docker/docker-compose.yml logs -f controller
+```
+
+Call the API from your machine on `localhost:8080`, as in the manual run:
+
+```bash
+curl -X POST localhost:8080/campaigns -H 'Content-Type: application/json' -d '{
+  "targetVersion": "2.0.0",
+  "imageUrl": "http://images.example/fw-2.0.0.bin",
+  "deviceFilter": {"currentVersion": "1.0.0"},
+  "maxConcurrent": 50,
+  "failureThresholdPercent": 25
+}'
+# {"id":"5b99d227-...","status":"PENDING","message":"Campaign created successfully"}
+
+curl localhost:8080/campaigns/<id>    # status and progress
+curl localhost:8080/metrics           # request and event counters
+```
+
+Stop:
+
+```bash
+sudo docker compose -f docker/docker-compose.yml down      # keep the campaigns
+sudo docker compose -f docker/docker-compose.yml down -v   # also delete the database
+```
+
+`DEVICE_COUNT=200 sudo -E docker compose ...` starts another fleet size.

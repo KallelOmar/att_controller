@@ -25,6 +25,15 @@ CONTROLLER_URL=http://localhost:8080 DEVICE_COUNT=1000 \
   uvicorn scripts.fw_simulator:app --port 9000
 ```
 
+Or with Docker Compose, which starts both (the database is kept in a Docker volume):
+
+```bash
+# From att_controller/
+docker compose -f docker/docker-compose.yml up --build
+# DEVICE_COUNT=200 docker compose -f docker/docker-compose.yml up   for another fleet size
+docker compose -f docker/docker-compose.yml down -v                 # stop and delete the database
+```
+
 Start a campaign and follow it:
 
 ```bash
@@ -171,7 +180,7 @@ failed. PERIODIC Informs log at DEBUG. Colours only on a terminal.
 
 | Key | Value | Why |
 |---|---|---|
-| `simulator_url` | `http://localhost:9000` | Where the fleet is listed and Connection Requests are sent. |
+| `simulator_url` | `http://localhost:9000` | Where the fleet is listed and Connection Requests are sent. The `SIMULATOR_URL` environment variable overrides it. |
 | `timeouts.notified_sec` | 60 | The simulator calls back within 3 s; offline devices never do. |
 | `timeouts.download_sent_sec` | 60 | The command-response follows the Download almost immediately. |
 | `timeouts.accepted_sec` | 600 | Download (up to 20 s) plus reboot (up to 240 s) in the simulator, with margin for late callbacks. |

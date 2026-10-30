@@ -1,7 +1,8 @@
 # Controller tuning parameters.
 
 # Simulator base URL, used to list the fleet and send Connection Requests.
-# In Docker Compose, use the simulator's service name, e.g. http://simulator:9000.
+# The SIMULATOR_URL environment variable overrides it: Docker Compose sets
+# http://simulator:9000.
 simulator_url: http://localhost:9000
 
 # Seconds a device may stay in each waiting state before it goes TIMED_OUT.

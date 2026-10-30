@@ -1,0 +1,39 @@
+# Controller and simulator, from att_controller/:
+#   docker compose -f docker/docker-compose.yml up --build
+
+x-image: &image
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+
+services:
+  controller:
+    <<: *image
+    command: uvicorn controller:app --app-dir scripts --host 0.0.0.0 --port 8080
+    environment:
+      SIMULATOR_URL: http://simulator:9000
+    ports:
+      - "8080:8080"
+    volumes:
+      - controller-data:/app/data   # campaigns survive a restart
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/metrics')"]
+      interval: 2s
+      retries: 15
+
+  simulator:
+    <<: *image
+    working_dir: /app/device_simulator
+    command: uvicorn scripts.fw_simulator:app --host 0.0.0.0 --port 9000
+    environment:
+      CONTROLLER_URL: http://controller:8080
+      DEVICE_COUNT: ${DEVICE_COUNT:-1000}
+    ports:
+      - "9000:9000"
+    # The devices send their first BOOT at start: the controller must be up.
+    depends_on:
+      controller:
+        condition: service_healthy
+
+volumes:
+  controller-data:

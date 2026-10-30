@@ -1,5 +1,6 @@
 """Tuning parameters, documented in config.yml."""
 
+import os
 from pathlib import Path
 
 import yaml
@@ -10,7 +11,8 @@ with open(CONFIG_PATH) as config_file:
     config = yaml.safe_load(config_file)
 
 # Base URL used to list devices and send Connection Requests to them.
-SIMULATOR_URL = config["simulator_url"].rstrip("/")
+# The SIMULATOR_URL environment variable overrides it (Docker Compose).
+SIMULATOR_URL = os.getenv("SIMULATOR_URL", config["simulator_url"]).rstrip("/")
 
 # Seconds a device may stay in each waiting state before it goes TIMED_OUT.
 NOTIFIED_TIMEOUT_SEC = config["timeouts"]["notified_sec"]
