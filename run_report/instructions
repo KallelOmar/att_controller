@@ -1,0 +1,50 @@
+How to reproduce the run report: two campaigns, one that completes and one that halts, run one after the
+other on the same controller and simulator.
+
+0- Start from a clean state
+Start the controller and the simulator as in the main README (or with Docker Compose, see docker/),
+with an empty database (delete data/ first, or use docker compose down -v) and DEVICE_COUNT=1000.
+Do not restart them between the two campaigns: campaign 2 must target the devices left on 1.0.0 by
+campaign 1.
+
+1- Completed campaign
+Choose a threshold above the fleet's failure rate (about 15 %): 25 %.
+curl -i -X POST http://localhost:8080/campaigns   -H "Content-Type: application/json"   -d '{
+    "targetVersion": "1.1.0",
+    "imageUrl": "https://example.com/firmware.bin",
+    "deviceFilter": {
+      "currentVersion": "1.0.0"
+    },
+    "maxConcurrent": 50,
+    "failureThresholdPercent": 25
+  }'
+
+Follow the campaign's progress by calling GET /campaigns/<id> every 10 s, with the id returned above (stop with Ctrl+C):
+
+watch -n 10 "curl -s localhost:8080/campaigns/<id> | python3 -m json.tool | head -40"
+
+As soon as the campaign status is COMPLETED (about 48 minutes), save the campaign and the metrics:
+curl -s localhost:8080/campaigns/<id> > campaign_completed.json
+curl -s localhost:8080/metrics        > metrics_completed.json
+
+2- Halted campaign
+Choose a threshold below the failure rate: 5 %.
+curl -i -X POST http://localhost:8080/campaigns   -H "Content-Type: application/json"   -d '{
+    "targetVersion": "1.1.0",
+    "imageUrl": "https://example.com/firmware.bin",
+    "deviceFilter": {
+      "currentVersion": "1.0.0"
+    },
+    "maxConcurrent": 25,
+    "failureThresholdPercent": 5
+  }'
+
+Follow it the same way.
+As soon as the campaign status is HALTED (about 2 minutes), save the campaign and the metrics:
+curl -s localhost:8080/campaigns/<id> > campaign_halted.json
+curl -s localhost:8080/metrics        > metrics_halted.json
+
+The /metrics counters are not reset between the two campaigns:
+for campaign 2, subtract metrics_completed.json from metrics_halted.json.
+
+run_report.md is written from these 4 JSON files.
