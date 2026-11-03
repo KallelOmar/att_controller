@@ -1,9 +1,4 @@
 """SQLite persistence, so a campaign survives a controller restart.
-
-Memory stays the working copy and this database the durable one: every
-change is written through, under state_lock, before the controller
-answers. The database is only read at startup. The device inventory and
-the /metrics counters are not saved: Informs and traffic rebuild them.
 """
 
 import json

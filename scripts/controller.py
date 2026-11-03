@@ -1,8 +1,5 @@
 """Device Management Controller: the HTTP APIs.
 
-Run from att_controller/:  uvicorn controller:app --app-dir scripts
-The endpoints take state_lock, then call the logic in campaigns.py and
-devices.py; scheduler.py runs in the background.
 """
 
 import asyncio

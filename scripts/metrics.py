@@ -1,10 +1,3 @@
-"""Request and event counters, served by GET /metrics.
-
-Counters live in memory and restart from zero with the controller;
-startedAt tells the window they cover. Campaign progress is not here:
-GET /campaigns/{id} reports it.
-"""
-
 import threading
 import urllib.error
 from collections import Counter

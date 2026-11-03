@@ -118,13 +118,6 @@ def set_device_status(campaign, attempt, status, reason=None, note=""):
 
 
 def retry_or_give_up(campaign, attempt):
-    """A Connection Request got no callback or could not be sent: send it
-    again, or give up.
-
-    Resending it is safe: the device has received no command yet. Between
-    tries the device waits as PENDING, so it does not hold a maxConcurrent
-    slot; the scheduler skips it until retryAt.
-    """
     # Not saved yet: a device restored from the database starts at 0
     retries = attempt.get("retries", 0)
     if retries >= MAX_RETRIES:
@@ -145,12 +138,6 @@ def retry_or_give_up(campaign, attempt):
 
 
 def check_timeouts():
-    """Time out stuck devices; return those to probe.
-
-    A Download is never resent: after NO_ACK or NO_COMPLETION the device
-    may be installing it. It only gets one more Connection Request, the
-    probe, whose Inform reports its firmware version.
-    """
     now = time.time()
     to_probe = []
     for campaign in campaigns:
@@ -343,10 +330,8 @@ def handle_command_response(device_id, request):
         attempt = campaign["devices"].get(device_id)
 
         if attempt and attempt.get("commandKey") == request.commandKey:
-            # Only a first answer to the Download counts; duplicates and
-            # answers after the outcome is known are ignored.
-            # TODO: after a timeout, accept it only for NO_ACK. After
-            # NO_COMPLETION the device already answered ACCEPTED.
+
+            # TODO: after a timeout, accept it only for NO_ACK. After NO_COMPLETION the device already answered ACCEPTED.
             if attempt["status"] not in ("DOWNLOAD_SENT", "TIMED_OUT"):
                 log_device(
                     logging.INFO,

@@ -26,8 +26,7 @@ from state import campaigns, state_lock, utc_now
 
 
 # Campaign states that still own their devices: a second campaign for the
-# same upgrade is refused while one of these exists. HALTED and COMPLETED
-# are final.
+# same upgrade is refused while one of these exists. HALTED and COMPLETED are final.
 ACTIVE_CAMPAIGN_STATES = ("PENDING", "IN_PROGRESS", "PAUSED")
 
 
@@ -118,8 +117,8 @@ def update_campaign_status(campaign):
 # ---------- Creation ----------
 
 def fetch_target_devices(current_version: str):
-    # TODO: add pagination. This call returns every device at once: fine
-    # for 1,000, not for millions.
+    # TODO: add pagination. This call returns every device at once
+    # fine for 1,000, not for millions.
     query = urllib.parse.urlencode({"version": current_version})
     try:
         with urllib.request.urlopen(

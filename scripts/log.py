@@ -1,15 +1,3 @@
-"""Log format and the campaign/device logging helpers.
-
-Line format: UTC time, level, one [subject] tag, then key=value details.
-  2026-10-29 10:15:04.502Z INFO  [GW-B74D0FB132E7] ACCEPTED -> SUCCEEDED
-      campaign=9a86f0c9-1b2c-4d3e-8f40-5a6b7c8d9e0f
-  2026-10-29 10:16:40.002Z WARN
-      [campaign 9a86f0c9-1b2c-4d3e-8f40-5a6b7c8d9e0f] IN_PROGRESS -> HALTED
-Levels: ERROR = the controller itself fails; WARN = unexpected but
-handled; INFO = normal progress, including device failures, which are
-expected outcomes; DEBUG = high-volume detail such as PERIODIC Informs.
-"""
-
 import logging
 import sys
 import time
@@ -89,8 +77,6 @@ def log_campaign(level, campaign, message, *args):
 
 
 def log_device(level, device_id, message, *args, campaign=None):
-    # The ID comes from the URL: pass it as an argument, never in the format.
-    # The campaign goes last as a detail, so the device stays the only tag.
     if campaign is None:
         logger.log(level, "[%s] " + message, device_id, *args)
     else:
