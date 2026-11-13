@@ -1,8 +1,5 @@
 # Controller tuning parameters.
 
-# Simulator base URL, used to list the fleet and send Connection Requests.
-# The SIMULATOR_URL environment variable overrides it: Docker Compose sets
-# http://simulator:9000.
 simulator_url: http://localhost:9000
 
 # Seconds a device may stay in each waiting state before it goes TIMED_OUT.
@@ -17,14 +14,9 @@ retry:
   max_retries: 2          # resends after the first: 3 Connection Requests
   backoff_sec: 30         # wait before the first resend, doubled each time
 
-# How often the scheduler runs: it times out stuck devices, then nudges
-# PENDING devices while a campaign is under maxConcurrent. A freed slot
-# waits at most one tick before it is refilled.
+
 scheduler_tick_sec: 2
 
-# A campaign halts when its failure rate exceeds failureThresholdPercent,
-# checked only once this many devices have finished (SUCCEEDED, FAILED or
-# TIMED_OUT). A fleet smaller than this never halts.
 min_sample_size: 20
 
 # A BOOT sooner than this after ACCEPTED is a duplicated BOOT from before
@@ -34,6 +26,4 @@ min_reboot_sec: 5
 # INFO hides PERIODIC Informs and uvicorn access lines; DEBUG shows them.
 log_level: INFO
 
-# SQLite file that keeps campaigns and their devices across restarts,
-# relative to this file. Delete it to start with no campaigns.
 db_path: data/controller.db

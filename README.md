@@ -217,7 +217,6 @@ In the order I would do them:
 | 5 | Maintenance windows: upgrade a device only at night in its own time zone. | Customers do not lose their connection during the day. |
 | 6 | API: `GET /campaigns`, `POST /campaigns/{id}/cancel`, per-device detail; authentication. | Operators need them; there is no authentication today. |
 | 7 | Save the device inventory, including devices outside any campaign, and target campaigns from it instead of the simulator listing. | The source of truth should be the controller, not one large unpaginated call. |
-| 8 | Structured JSON logs; Docker for the controller and the simulator. | Log search in production; one-command setup. |
 
 Running across millions of devices and several controller instances is
 a larger change: see the scaling note.
